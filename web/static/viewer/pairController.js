@@ -35,8 +35,9 @@
   var _sideOpen = null;      // last observed .open state
   var _openWorkSent = false; // leader bootstrap OPEN_WORK already dispatched
   var _selIssued = false;    // a SET_ACTIVITY selecting is outstanding
+  var _wireBrowse = null;    // last authoritative shared-browse bool (member-drive)
   var _sawJoinReq = false;   // joinRequest edge — auto-approve (#114)
-  var _heldCommit = null;    // newest suppressed commit while leader browses
+  var _heldCommit = null;    // newest suppressed commit while a member browses
   var _pendingCommit = null; // newest commit held while visibility is pending
   var _lastApply = null;     // newest committed args, for display re-arm
   var _appliedKey = null;    // display key of the newest APPLIED commit
@@ -104,6 +105,20 @@
 
   /* ── committed-state sink ── */
 
+  /* Drive authority for this client/mode. The new client surface exposes
+   * `canDrive` (trust-aware). Only a stale pre-trust pairClient shell has
+   * no such field — a rolled-back server still yields a boolean because the
+   * new pairClient infers legacy member trust when the server omits it —
+   * `undefined` there means the legacy surface, whose authority is purely
+   * role-based, so fall back to `role === 'leader'` rather than dead-ending
+   * every drive action or bailing picks to solo. An explicit boolean
+   * `false` is the new client genuinely denying drive and never falls back. */
+  function _driveAllowed(st) {
+    if (!st) return false;
+    if (typeof st.canDrive === 'boolean') return st.canDrive;
+    return st.role === 'leader';
+  }
+
   /* What the display actually shows for a commit — phase/presence flaps
    * (selecting/active/paused activity echoes) don't move it, but a work
    * pick or a remote turn does. */
@@ -111,6 +126,28 @@
     if (!snap) return '';
     return [snap.manifestVersion, snap.spreadId, snap.offset,
             snap.leaderSide].join('|');
+  }
+
+  /* May this client/mode be holding a shared-browse echo behind the open
+   * list? `localRole` is the role of THIS member (never the commit's
+   * origin): legacy mode lets only the leader drive that list. In
+   * member-drive mode the snapshot's explicit browse bit is the authority
+   * that the list is a shared surface — except during the open roundtrip:
+   * after we issue SET_ACTIVITY selecting and before the browse:true STATE
+   * lands, every snap still carries the bit false, so the bit alone would
+   * deny the hold exactly while the user is opening the list. `selIssued`
+   * covers that window; it clears on the wire close edge and on local
+   * close, so it cannot outlive the shared browse itself. Guests never
+   * hold that echo. */
+  function _mayHoldSharedBrowseEcho(localRole, memberDrive, trust, browseOpen, selIssued) {
+    // Only an explicit guest is denied. A pre-trust server never emits trust
+    // and an old pairClient never infers it, so absent trust is the legacy
+    // case where every member was full — treating it as guest denial would
+    // strip the legacy leader of echo-holding in the mixed-shell direction
+    // (new controller + old pairClient).
+    if (trust === 'guest') return false;
+    if (memberDrive === true) return browseOpen === true || selIssued === true;
+    return localRole === 'leader';
   }
 
   function _applyCommitted(snap, manifest, o) {
@@ -135,13 +172,18 @@
       return;
     }
     _lastApply = {snap: snap, manifest: manifest, o: o};
-    var leader = !!(o && o.role === 'leader');
-    if (leader && _sidebarOpen() && _displayKey(snap) === _appliedKey) {
-      // Leader is browsing the shared-work list: an echo that changes
+    var stNow = _client ? _client.state : null;
+    var memberDrive = !!(stNow && stNow.memberDrive === true);
+    var mayHoldSharedBrowseEcho = _mayHoldSharedBrowseEcho(
+      o && o.role, memberDrive, stNow && stNow.trust,
+      !!(snap && snap.browse === true), _selIssued);
+    if (mayHoldSharedBrowseEcho && _sidebarOpen() &&
+        _displayKey(snap) === _appliedKey) {
+      // A member is browsing the shared-work list: an echo that changes
       // nothing on screen must not rip the grid away — hold it; the
       // newest held commit replays on close. This has to key on display
       // state, not phase: a dead member pins the derived phase at
-      // 'paused' even while the leader selects, so a peer-away STATE
+      // 'paused' even while the member selects, so a peer-away STATE
       // would otherwise apply, re-enter the torn-down pair strip and
       // slam the sidebar shut. Real display moves (work pick, remote
       // turn) still apply immediately and close the list.
@@ -154,6 +196,11 @@
   }
 
   /* ── sidebar observer: leader browse pauses/resumes the session ── */
+
+  function _legacyLeaderCloseEndsBrowse(st, selectionIssued) {
+    return !!(st && st.role === 'leader' &&
+              (selectionIssued || st.phase === 'selecting'));
+  }
 
   function _ensureSidebarObs() {
     if (_sideObs || typeof document === 'undefined' ||
@@ -168,15 +215,37 @@
       var st = _client ? _client.state : null;
       if (!_memberBound(st) || !_paired(st)) return;
       if (open) {
-        if (st.role === 'leader' && !_selIssued && st.phase !== 'selecting') {
-          _selIssued = true;
-          _client.setActivity('selecting');
+        // A mirror-initiated programmatic open (the peer's frame auto-opened
+        // this sidebar) is not the user foregrounding shared selection —
+        // ephemeral receipt must not leak into the control plane as a
+        // SET_ACTIVITY open, or a casual mirror frame could flip the pair
+        // into explicit shared browse. Marker set by pairSync before opening.
+        var openIntent = window.__bookqSidebarOpenIntent;
+        if (openIntent && openIntent.programmatic) return;
+        var mayOpen = _driveAllowed(st);
+        var wireOpen = st.memberDrive === true
+          ? st.browse === true
+          : st.phase === 'selecting';
+        var precommit = st.phase === 'selecting' && !st.spreadId;
+        if (mayOpen && !_selIssued && !wireOpen && !precommit) {
+          // Only a real wire send counts as outstanding — a socket-drop
+          // local look must not make a later close emit endBrowse. The
+          // pre-pair launcher is not shared browse either: before the first
+          // committed work the derived phase is already selecting, and both
+          // tabs can still have their local folder list open.
+          _selIssued = _client.setActivity('selecting') === true;
         }
         return;
       }
-      // Close: re-arm the shared display first, then resume the session —
-      // covers cancel-after-browse on the leader and any member whose local
-      // browse tore the paired strip down without a commit landing.
+      // Close: capture the user's close intent BEFORE re-arming the shared
+      // display. enterPairStrip() programmatically calls closeSidebar()
+      // while restoring the reader; reading the marker only after that
+      // replay would overwrite an explicit cancel with explicit:false.
+      var closeIntent = window.__bookqSidebarCloseIntent;
+      var explicitClose = !!(closeIntent && closeIntent.explicit);
+      // Re-arm the shared display first, then resume the session — covers
+      // cancel-after-browse on the leader and any member whose local browse
+      // tore the paired strip down without a commit landing.
       var pv = _PV();
       if (_heldCommit) {
         var c = _heldCommit;
@@ -193,7 +262,20 @@
           _appliedKey = _displayKey(d.snap);
         } catch (e2) { /* idem */ }
       }
-      if (st.role === 'leader' && (_selIssued || st.phase === 'selecting')) {
+      if (st.memberDrive === true) {
+        // New close semantics: active/suspended alone never end shared
+        // browse. Only an explicit local close gesture carries endBrowse;
+        // programmatic closes (mirror disarm, work pick, navigation) do not.
+        if (explicitClose && _driveAllowed(st) &&
+            (_selIssued || st.browse === true)) {
+          _selIssued = false;
+          _client.setActivity('active', {endBrowse: true});
+        } else {
+          _selIssued = false;
+        }
+      } else if (_legacyLeaderCloseEndsBrowse(st, _selIssued)) {
+        // Mixed-capability fallback: preserve the legacy leader-close
+        // meaning exactly, because the old peer has no endBrowse concept.
         _selIssued = false;
         _client.setActivity('active');
       }
@@ -212,8 +294,8 @@
     return _VN().request(intent);   // re-enters the default (solo) handler
   }
 
-  /* The one non-data intent for the leader: browsing the work list. */
-  function _leaderBrowse(via) {
+  /* The one non-data drive intent: browsing the work list. */
+  function _driveBrowse(via) {
     var ok = _client ? _client.sendIntent({type: 'browse'}) : false;
     _record({type: 'browse', via: via}, ok);
     _selIssued = _selIssued || ok;
@@ -292,7 +374,7 @@
       .catch(function () { done(null); });
   }
 
-  function _leaderOpenWork(intent) {
+  function _driveOpenWork(intent) {
     var gen = ++_resolveGen;
     function emit(page) {
       // A leader pick of a hidden work (incl. one whose root was hidden
@@ -350,17 +432,21 @@
       }
       case 'openWork':
         // 通常モードでの禁止作品 pick — wire に出さず同期を解除してトップへ。
-        // (_leaderOpenWork re-checks at emit time for the async resolve.)
+        // (_driveOpenWork re-checks at emit time for the async resolve.)
         if (_visBlocksFolder(intent.folder)) {
           _denyHiddenWork();
           return true;
         }
-        return st.role === 'leader' ? _leaderOpenWork(intent)
-                                    : _bailToSolo(intent);
+        if (_driveAllowed(st)) {
+          return _driveOpenWork(intent);
+        }
+        return _bailToSolo(intent);
       case 'browse':
-        if (st.role === 'leader') return _leaderBrowse(intent.via);
-        // Follower browsing is a local look at the list — the pair stays
-        // (a work PICK is what releases it); the next commit pulls the
+        if (_driveAllowed(st)) {
+          return _driveBrowse(intent.via);
+        }
+        // Legacy follower browsing is a local look at the list — the pair
+        // stays (a work PICK is what releases it); the next commit pulls the
         // shared display back in front. Mirrors the solo browse case.
         _record({type: 'browse', via: intent.via, local: true}, true);
         if (typeof window.returnToBrowse === 'function') {
@@ -409,7 +495,8 @@
     // The open book is a hidden root in normal mode — never send it as the
     // shared work; deny like a solo open of the same folder.
     if (_visBlocksFolder(folder)) { _denyHiddenWork(); return; }
-    var ok = _client.sendIntent({type: 'openWork', folder: folder, page: page});
+    var ok = _client.sendIntent({type: 'openWork', folder: folder, page: page,
+                                 auto: true});
     _record({type: 'openWork', via: 'pair-bootstrap', folder: folder,
              page: page}, ok);
     // A dropped send (transient link loss) retries on the next state notify.
@@ -420,6 +507,7 @@
     _uninstallNav();
     _openWorkSent = false;
     _selIssued = false;
+    _wireBrowse = null;
     _heldCommit = null;
     _pendingCommit = null;
     _lastApply = null;
@@ -434,7 +522,29 @@
   }
 
   function _onClientState(st) {
-    if (st && st.phase !== 'selecting') _selIssued = false;
+    var browseExplicit = !!(st && (st.memberDrive === true ||
+        st.browse === true || (st.browseGeneration || 0) > 0));
+    if (browseExplicit) {
+      // Track the authoritative shared-browse boolean independently of the
+      // derived phase and independently of the current capability
+      // intersection. A RESUME downgrade closes browse and loses memberDrive
+      // in the same STATE; the additive browse:false+generation encoding is
+      // what lets that close reach this handler. The closeSidebar call is
+      // deliberately programmatic (no explicit marker), so it cannot echo
+      // endBrowse.
+      var browseNow = st.browse === true;
+      if (_wireBrowse === true && !browseNow) {
+        _selIssued = false;
+        if (_sidebarOpen() && typeof window.closeSidebar === 'function') {
+          try { window.closeSidebar(); } catch (e) { /* best-effort */ }
+        }
+      }
+      _wireBrowse = browseNow;
+    } else {
+      _wireBrowse = null;
+      // Legacy mixed-pair fallback keeps the old phase-derived meaning.
+      if (st && st.phase !== 'selecting') _selIssued = false;
+    }
     // Auto-approve (#114): a JOIN reaching the leader is answered at once —
     // there is no manual approve step in the UI. Edge-triggered so a pending
     // request yields exactly one APPROVE; client.approve() is idempotent for
@@ -458,6 +568,7 @@
       _heldCommit = null;
       _pendingCommit = null;
       _appliedKey = null;
+      _wireBrowse = null;
     }
     if (bound) _maybeBootstrapWork(st);
     _notify();
@@ -491,6 +602,25 @@
     _notify();
   }
 
+  function _pairSyncSupportsMemberDrive() {
+    try {
+      // member-drive is a composition property, not a pairSync property:
+      // - pairSync (API>=2) understands generation/open-close semantics;
+      // - app.js close API emits the close-intent marker — without it an
+      //   explicit user close is indistinguishable from a programmatic one,
+      //   endBrowse never emits, and shared browse wedges open server-side;
+      // - pairClient (API>=2) forwards browseGeneration — without it the
+      //   client's own frames drop server-side during explicit opens.
+      // Any SWR-stale component fails the whole composition closed into
+      // legacy leader-drive semantics.
+      return window.BOOKQ_BROWSE_SYNC_API >= 2 &&
+        window.BOOKQ_SIDEBAR_CLOSE_API >= 1 &&
+        window.BOOKQ_PAIR_CLIENT_API >= 2;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function _ensureClient() {
     if (_client) return _client;
     if (!globalThis.PairClient ||
@@ -498,6 +628,15 @@
       throw new Error('pairClient unavailable');
     }
     _client = globalThis.PairClient.createClient({
+      // This controller implements explicit member-drive close/endBrowse,
+      // but that is only half of the composition: pairSync must also
+      // understand generation/open-close semantics. A stale SWR-cached
+      // pairSync cannot be detected by the old boolean marker, so opt in
+      // only when its versioned API marker is present. Mixed shells fail
+      // closed into legacy leader-drive semantics.
+      features: _pairSyncSupportsMemberDrive()
+        ? [globalThis.PairClient.CAP_MEMBER_DRIVE || 'member-drive-v1']
+        : [],
       webrtc: {},                 // enable the webrtc-dc upgrade path
       applyState: _applyCommitted,
       onEvent: _onClientEvent,
@@ -644,12 +783,14 @@
     swapSides: function () {
       return _client ? _client.swapSides() : false;
     },
-    /* Leader "作品変更": pause the session at 'selecting' and open the
-     * shared-work list locally; the next tile pick goes out as OPEN_WORK. */
+    /* Member "作品変更": legacy pairs keep this leader-only; when the
+     * member-drive capability intersects, either member may enter shared
+     * browse. Guests remain excluded through canDrive. */
     changeWork: function () {
       var st = _client ? _client.state : null;
-      if (!_memberBound(st) || st.role !== 'leader') return false;
-      return _leaderBrowse('change-work');
+      if (!_memberBound(st) ||
+          !(_driveAllowed(st))) return false;
+      return _driveBrowse('change-work');
     },
     sendIntent: function (intent) {
       return _client ? _client.sendIntent(intent) : false;
@@ -717,6 +858,8 @@
   if (window.__BOOKQ_TEST_MODE__ === 'true') {
     window.__pairCtlTest = {
       applyCommitted: _applyCommitted,
+      driveAllowed: _driveAllowed,
+      mayHoldSharedBrowseEcho: _mayHoldSharedBrowseEcho,
       get pendingCommit() { return _pendingCommit; },
       get heldCommit() { return _heldCommit; },
     };
@@ -727,7 +870,11 @@
         document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', _boot);
     } else if (typeof document !== 'undefined') {
-      _boot();
+      /* Defer-script execution is already after parsing, but pairSync is
+       * still a later sibling script. Boot-time credential resume must not
+       * compose the client before that script has had a chance to publish
+       * its versioned API marker. */
+      setTimeout(_boot, 0);
     }
   }
 })();

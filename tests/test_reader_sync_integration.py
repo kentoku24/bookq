@@ -6,7 +6,7 @@ test server, no protocol fakes.
 Covers the #84 machine-checkable criteria: shared-spread establishment from
 the leader's current PageRef, exactly one wire request per user input on
 every input path, leader/follower convergence, leader browse→selecting→
-cancel→work-change phases, follower work change = LEAVE + solo, shared-anchor
+cancel→work-change phases, member-drive follower work changes, shared-anchor
 URL/progress writes (blank side never saves null), one hashchange listener,
 swipe/remote races converging on the latest commit, transport fallback, and
 zero sockets in solo mode.
@@ -117,6 +117,27 @@ def _pair_now(pl, pf, timeout=15000):
         # round-trip to settle the session into 'reading' before ops.
         p.wait_for_function(
             "() => window.PairController.state.phase === 'reading'",
+            timeout=timeout)
+
+
+def _pair_without_work(pl, pf, timeout=15000):
+    """Pair two top-screen devices with no current reader work.
+
+    The initial no-manifest state is intentionally phase='selecting' even
+    though shared browse is still closed (ADR 0004), so this is the state
+    machine edge that a plain phase-only mirror arm cannot distinguish.
+    """
+    pl.evaluate("() => window.PairController.create()")
+    pl.wait_for_function("() => !!window.PairController.state.code",
+                         timeout=timeout)
+    code = pl.evaluate("() => window.PairController.state.code")
+    pf.evaluate("(c) => window.PairController.join(c)", code)
+    for p in (pl, pf):
+        p.wait_for_function(
+            "() => window.PairController.state.phase === 'selecting'"
+            " && window.PairController.state.memberDrive === true"
+            " && window.PairController.state.spreadId === null"
+            " && Object.keys(window.PairController.state.presence || {}).length >= 2",
             timeout=timeout)
 
 
@@ -347,6 +368,36 @@ def test_follower_initiated_turn_converges(devs):
 
 # ── leader browse / work change ───────────────────────────────────────────
 
+def test_initial_shared_work_selection_syncs_list(devs):
+    """member-drive regression: pair two devices before either has opened a
+    work, close one side's local launcher list, then open shared browse from
+    the other side. Because the no-work phase is already 'selecting', browse
+    opening does NOT produce a phase edge — the mirror must arm on the
+    orthogonal browse edge, send the first frame, auto-open the peer list,
+    and mirror the first folder navigation."""
+    pl, pf = devs
+    pl.evaluate("() => window.closeSidebar()")
+    _pair_without_work(pl, pf)
+
+    assert pf.evaluate("() => window.PairController.changeWork()") is True
+    for p in (pl, pf):
+        p.wait_for_function(
+            "() => window.PairController.state.browse === true"
+            " && window.PairController.state.phase === 'selecting'",
+            timeout=15000)
+        p.wait_for_function(
+            "() => document.getElementById('sidebar').classList.contains('open')",
+            timeout=10000)
+
+    pf.eval_on_selector(
+        "#tile-grid .tile[data-path='series']", "el => el.click()")
+    for p in (pl, pf):
+        p.wait_for_function("() => window.currentBrowsePath === 'series'",
+                            timeout=15000)
+    assert any(f.get("type") == "UI_SYNC" for f in _sent(pf)), \
+        "the member opening shared browse must put mirror frames on the wire"
+
+
 def test_leader_browse_selecting_cancel_then_change_work(devs):
     pl, pf = devs
     _open(pl, "long", "p005.png")
@@ -363,7 +414,7 @@ def test_leader_browse_selecting_cancel_then_change_work(devs):
             timeout=15000)
 
     # Cancel: closing the sidebar returns the leader to the shared spread.
-    pl.evaluate("() => window.closeSidebar()")
+    pl.evaluate("() => window.closeSidebar({explicit: true})")
     for p in (pl, pf):
         p.wait_for_function(
             "() => window.PairController.state.phase === 'reading'",
@@ -388,31 +439,43 @@ def test_leader_browse_selecting_cancel_then_change_work(devs):
     assert _pv(pl)["spreadId"] == _pv(pf)["spreadId"]
 
 
-def test_follower_work_change_leaves_pair(devs):
-    """followerの作品変更はLEAVE後の単独操作: the session ends for both and
-    the leader's solo book/position are untouched by the work pick itself."""
+def test_follower_work_change_relays_over_real_datachannel(devs):
+    """member-drive: a follower OPEN_WORK stays in the pair and, once the
+    real browser WebRTC upgrade is up, rides the follower→leader DataChannel.
+    The follower's control WS must not carry the sequenced op; the leader's
+    relayed copy must carry payload.origin='follower'."""
     pl, pf = devs
     _open(pl, "long", "p005.png")
     _open(pf, "series/vol1")
     _pair_now(pl, pf)
     assert _pv(pl)["active"] is True
+    for p in (pl, pf):
+        p.wait_for_function(
+            "() => window.PairController.state.transport === 'webrtc-dc'",
+            timeout=15000)
 
+    f0 = len(_sent(pf, {"OPEN_WORK"}))
+    l0 = len(_sent(pl, {"OPEN_WORK"}))
     pf.evaluate(
         "() => window.ViewerNavigation.request("
         "{type:'openWork', folder:'simple_manga', via:'tile'})")
     for p in (pl, pf):
         p.wait_for_function(
-            "() => window.PairController.state.status === 'ended'",
+            "() => window.currentFolder === 'simple_manga'"
+            " && window.PairController.state.phase === 'reading'"
+            " && window.PairController.state.status === 'connected'",
             timeout=15000)
-        p.wait_for_function(
-            "() => !(window.PairedView && window.PairedView.state"
+        assert p.evaluate(
+            "() => !!(window.PairedView && window.PairedView.state"
             " && window.PairedView.state().active)")
-    # follower's pick became a solo open; leader fell back to its own book.
-    pf.wait_for_function("() => window.currentFolder === 'simple_manga'")
-    assert pf.evaluate("() => window.images.length") == 5
-    pl.wait_for_function("() => window.currentFolder === 'long'")
-    assert pl.evaluate("() => window.images.length") == 30
-    assert pl.evaluate("() => window.images[window.currentIdx].name") == "p005.png"
+
+    follower_wire = _sent(pf, {"OPEN_WORK"})[f0:]
+    leader_wire = _sent(pl, {"OPEN_WORK"})[l0:]
+    assert not follower_wire,         "follower sequenced ops must leave on the DataChannel, not its control WS"
+    relayed = [f for f in leader_wire
+               if (f.get("payload") or {}).get("origin") == "follower"]
+    assert relayed, "leader must relay the follower's DataChannel OPEN_WORK"
+    assert relayed[-1]["payload"]["folder"] == "simple_manga"
 
 
 def _kill_ws(pg):
@@ -487,8 +550,8 @@ def test_peer_away_leader_browse_stays_on_tile_list(devs):
 
 
 def test_peer_away_follower_browse_opens_tile_list(devs):
-    """相手不在 on the follower: ☰ opens the tile list locally (browse never
-    touches the wire for followers) and a pick LEAVEs into a solo open."""
+    """相手不在 on the follower: member-drive semantics survive the leader's
+    temporary absence — the shared tile list opens and a pick commits in-pair."""
     pl, pf = devs
     _open(pl, "long", "p005.png")
     _open(pf, "series/vol1")
@@ -509,11 +572,12 @@ def test_peer_away_follower_browse_opens_tile_list(devs):
     pf.eval_on_selector(
         ".tile[data-path='simple_manga']", "el => el.click()")
     pf.wait_for_function(
-        "() => window.PairController.state.status === 'ended'"
-        " || window.PairController.state.status === 'idle'",
+        "() => window.currentFolder === 'simple_manga'"
+        " && window.PairController.state.status === 'peer-away'",
         timeout=15000)
-    pf.wait_for_function(
-        "() => window.currentFolder === 'simple_manga'", timeout=15000)
+    assert pf.evaluate(
+        "() => !!(window.PairedView && window.PairedView.state"
+        " && window.PairedView.state().active)")
 
 
 def test_offline_leave_flushes_leave_and_frees_peer(devs):

@@ -1,565 +1,5068 @@
 {
-  "format": 1,
-  "doc": "Canonical golden-frame cases for /ws/reader-sync (#210). Every implementation adapter drives its in-process session core through `steps` and must emit the exact frame sequence in each `expect`. Dynamic values use @bindings harvested from received frames: @<link>.link, @<link>.member, @<link>.token, @session, @code, @digest, @leader.member, @follower.member, @manifest.canonical (canonical JSON text of the case's resolver manifest; single-chunk cases only). Ops: link/send/expect/drain/detach/tick. Every client request carries the full request envelope {v, requestId, sessionId, workEpoch, baseRevision, type, payload} — lifecycle ops use sessionId:null workEpoch:0 baseRevision:0. requestIds must be unique within a case: .member/.token bindings resolve the sending link by requestId alone, so a second link reusing an id mis-attributes. tick is currently py-adapter-only — the rs adapter panics on it (real-clock core), so cases must not use it until both sides implement it.",
-  "resolver": {
-    "work": {
-      "folder": "work",
-      "offset": 0,
-      "chapters": [
-        {"name": "c0", "folder": "work",
-         "pages": ["p001.png", "p002.png", "p003.png", "p004.png", "p005.png"]}
-      ]
+ "format": 1,
+ "doc": "Canonical golden-frame cases for /ws/reader-sync (#210). Every implementation adapter drives its in-process session core through `steps` and must emit the exact frame sequence in each `expect`. Dynamic values use @bindings harvested from received frames: @<link>.link, @<link>.member, @<link>.token, @session, @code, @digest, @leader.member, @follower.member, @manifest.canonical (canonical JSON text of the case's resolver manifest; single-chunk cases only). Ops: link/send/expect/drain/detach/tick. Every client request carries the full request envelope {v, requestId, sessionId, workEpoch, baseRevision, type, payload} — lifecycle ops use sessionId:null workEpoch:0 baseRevision:0. Distinct logical requests must use unique requestIds within a case: .member/.token bindings resolve the sending link by requestId alone, so a second link reusing an id mis-attributes. A retransmission of the same logical request on the same link intentionally repeats that requestId (the dedup cases depend on this). tick currently has no live adapter implementation — the Python harness is retired and the rs adapter panics on it (real-clock core), so cases must not use it unless harness support is added.",
+ "resolver": {
+  "work": {
+   "folder": "work",
+   "offset": 0,
+   "chapters": [
+    {
+     "name": "c0",
+     "folder": "work",
+     "pages": [
+      "p001.png",
+      "p002.png",
+      "p003.png",
+      "p004.png",
+      "p005.png"
+     ]
     }
+   ]
+  }
+ },
+ "cases": [
+  {
+   "id": "pairing_create_join_approve",
+   "title": "CREATE -> code ACK -> JOIN -> pending -> APPROVE -> paired selecting",
+   "steps": [
+    {
+     "op": "link",
+     "as": "L1",
+     "user": {
+      "email": "alice@example.com",
+      "name": "Alice",
+      "picture": ""
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "HELLO",
+       "link": "@L1.link",
+       "features": [
+        "member-drive-v1"
+       ]
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "c1",
+      "sessionId": null,
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "CREATE",
+      "payload": {}
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "c1",
+       "request": "CREATE",
+       "sessionId": "@session",
+       "data": {
+        "sessionId": "@session",
+        "code": "@code",
+        "memberId": "@L1.member",
+        "role": "leader",
+        "resumeToken": "@L1.token",
+        "expiresInSec": 300,
+        "guestToken": "@L1.guestToken",
+        "trust": "member",
+        "features": [
+         "member-drive-v1"
+        ]
+       }
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 1,
+       "workEpoch": 0,
+       "manifestVersion": 0,
+       "phase": "waiting",
+       "spreadId": null,
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ]
+      }
+     ]
+    },
+    {
+     "op": "link",
+     "as": "L2",
+     "user": {
+      "email": "bob@example.com",
+      "name": "Bob",
+      "picture": ""
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "HELLO",
+       "link": "@L2.link",
+       "features": [
+        "member-drive-v1"
+       ]
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "j1",
+      "sessionId": null,
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "JOIN",
+      "payload": {
+       "code": "@code"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "j1",
+       "request": "JOIN",
+       "sessionId": "@session",
+       "data": {
+        "sessionId": "@session",
+        "memberId": "@L2.member",
+        "role": "follower",
+        "resumeToken": "@L2.token",
+        "leaderName": "Alice",
+        "trust": "member",
+        "features": [
+         "member-drive-v1"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "JOIN_REQUEST",
+       "sessionId": "@session",
+       "memberId": "@L2.member",
+       "name": "Bob"
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "a1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 1,
+      "type": "APPROVE",
+      "payload": {
+       "memberId": "@L2.member"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "a1",
+       "request": "APPROVE",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 2,
+       "workEpoch": 0,
+       "manifestVersion": 0,
+       "phase": "selecting",
+       "spreadId": null,
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ]
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 2,
+       "workEpoch": 0,
+       "manifestVersion": 0,
+       "phase": "selecting",
+       "spreadId": null,
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ]
+      }
+     ]
+    }
+   ]
   },
-  "cases": [
+  {
+   "id": "open_work_manifest_ready_reading",
+   "title": "OPEN_WORK -> loading -> MANIFEST chunks -> READY x2 -> reading",
+   "resolver": "work",
+   "steps": [
     {
-      "id": "pairing_create_join_approve",
-      "title": "CREATE -> code ACK -> JOIN -> pending -> APPROVE -> paired selecting",
-      "steps": [
-        {"op": "link", "as": "L1",
-         "user": {"email": "alice@example.com", "name": "Alice", "picture": ""}},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "HELLO", "link": "@L1.link"}]},
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "c1", "sessionId": null, "workEpoch": 0,
-          "baseRevision": 0, "type": "CREATE", "payload": {}}},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "ACK", "requestId": "c1", "request": "CREATE",
-           "sessionId": "@session",
-           "data": {"sessionId": "@session", "code": "@code",
-                    "memberId": "@L1.member", "role": "leader",
-                    "resumeToken": "@L1.token", "expiresInSec": 300,
-                    "guestToken": "@L1.guestToken"}},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 1,
-           "workEpoch": 0, "manifestVersion": 0, "phase": "waiting",
-           "spreadId": null, "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {"@L1.member": {"role": "leader", "status": "active",
-                                     "name": "Alice", "ready": false}}}]},
-        {"op": "link", "as": "L2",
-         "user": {"email": "bob@example.com", "name": "Bob", "picture": ""}},
-        {"op": "expect", "link": "L2", "frames": [
-          {"v": 1, "type": "HELLO", "link": "@L2.link"}]},
-        {"op": "send", "link": "L2", "frame": {
-          "v": 1, "requestId": "j1", "sessionId": null, "workEpoch": 0,
-          "baseRevision": 0, "type": "JOIN", "payload": {"code": "@code"}}},
-        {"op": "expect", "link": "L2", "frames": [
-          {"v": 1, "type": "ACK", "requestId": "j1", "request": "JOIN",
-           "sessionId": "@session",
-           "data": {"sessionId": "@session", "memberId": "@L2.member",
-                    "role": "follower", "resumeToken": "@L2.token",
-                    "leaderName": "Alice"}}]},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "JOIN_REQUEST", "sessionId": "@session",
-           "memberId": "@L2.member", "name": "Bob"}]},
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "a1", "sessionId": "@session", "workEpoch": 0,
-          "baseRevision": 1, "type": "APPROVE",
-          "payload": {"memberId": "@L2.member"}}},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "ACK", "requestId": "a1", "request": "APPROVE",
-           "sessionId": "@session", "data": {}},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 2,
-           "workEpoch": 0, "manifestVersion": 0, "phase": "selecting",
-           "spreadId": null, "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": false},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": false}}}]},
-        {"op": "expect", "link": "L2", "frames": [
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 2,
-           "workEpoch": 0, "manifestVersion": 0, "phase": "selecting",
-           "spreadId": null, "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": false},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": false}}}]}
-      ]
+     "op": "link",
+     "as": "L1",
+     "user": {
+      "email": "alice@example.com",
+      "name": "Alice",
+      "picture": ""
+     }
     },
     {
-      "id": "open_work_manifest_ready_reading",
-      "title": "OPEN_WORK -> loading -> MANIFEST chunks -> READY x2 -> reading",
-      "resolver": "work",
-      "steps": [
-        {"op": "link", "as": "L1",
-         "user": {"email": "alice@example.com", "name": "Alice", "picture": ""}},
-        {"op": "drain", "link": "L1"},
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "c1", "sessionId": null, "workEpoch": 0,
-          "baseRevision": 0, "type": "CREATE", "payload": {}}},
-        {"op": "drain", "link": "L1"},
-        {"op": "link", "as": "L2",
-         "user": {"email": "bob@example.com", "name": "Bob", "picture": ""}},
-        {"op": "drain", "link": "L2"},
-        {"op": "send", "link": "L2", "frame": {
-          "v": 1, "requestId": "j1", "sessionId": null, "workEpoch": 0,
-          "baseRevision": 0, "type": "JOIN", "payload": {"code": "@code"}}},
-        {"op": "drain", "link": "L1"},
-        {"op": "drain", "link": "L2"},
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "a1", "sessionId": "@session", "workEpoch": 0,
-          "baseRevision": 1, "type": "APPROVE",
-          "payload": {"memberId": "@L2.member"}}},
-        {"op": "drain", "link": "L1"},
-        {"op": "drain", "link": "L2"},
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "o1", "sessionId": "@session", "workEpoch": 0,
-          "baseRevision": 2, "type": "OPEN_WORK",
-          "payload": {"folder": "work",
-                      "page": {"folder": "work", "name": "p001.png"},
-                      "offset": 0}}},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "ACK", "requestId": "o1", "request": "OPEN_WORK",
-           "sessionId": "@session", "data": {}},
-          {"v": 1, "type": "APPLIED", "sessionId": "@session",
-           "requestId": "o1", "revision": 3, "by": "leader"},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 3,
-           "workEpoch": 0, "manifestVersion": 0, "phase": "loading",
-           "spreadId": null, "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": false},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": false}}},
-          {"v": 1, "kind": "manifest-chunk", "digest": "@digest",
-           "index": 0, "count": 1, "data": "@manifest.canonical",
-           "type": "MANIFEST", "sessionId": "@session",
-           "workEpoch": 1, "manifestVersion": 1},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 4,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "loading",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": false},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": false}}}]},
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "r1", "sessionId": "@session", "workEpoch": 1,
-          "baseRevision": 4, "type": "READY",
-          "payload": {"manifestVersion": 1}}},
-        {"op": "expect", "link": "L2", "frames": [
-          {"v": 1, "type": "APPLIED", "sessionId": "@session",
-           "requestId": "o1", "revision": 3, "by": "leader"},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 3,
-           "workEpoch": 0, "manifestVersion": 0, "phase": "loading",
-           "spreadId": null, "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": false},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": false}}},
-          {"v": 1, "kind": "manifest-chunk", "digest": "@digest",
-           "index": 0, "count": 1, "data": "@manifest.canonical",
-           "type": "MANIFEST", "sessionId": "@session",
-           "workEpoch": 1, "manifestVersion": 1},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 4,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "loading",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": false},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": false}}},
-          {"v": 1, "type": "APPLIED", "sessionId": "@session",
-           "requestId": "r1", "revision": 5, "by": "leader"},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 5,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "loading",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": false}}}]},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "ACK", "requestId": "r1", "request": "READY",
-           "sessionId": "@session", "data": {}},
-          {"v": 1, "type": "APPLIED", "sessionId": "@session",
-           "requestId": "r1", "revision": 5, "by": "leader"},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 5,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "loading",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": false}}}]},
-        {"op": "send", "link": "L2", "frame": {
-          "v": 1, "requestId": "r2", "sessionId": "@session", "workEpoch": 1,
-          "baseRevision": 5, "type": "READY",
-          "payload": {"manifestVersion": 1}}},
-        {"op": "expect", "link": "L2", "frames": [
-          {"v": 1, "type": "ACK", "requestId": "r2", "request": "READY",
-           "sessionId": "@session", "data": {}},
-          {"v": 1, "type": "APPLIED", "sessionId": "@session",
-           "requestId": "r2", "revision": 6, "by": "follower"},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 6,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": true}}}]},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "APPLIED", "sessionId": "@session",
-           "requestId": "r2", "revision": 6, "by": "follower"},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 6,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": true}}}]}
-      ]
+     "op": "drain",
+     "link": "L1"
     },
     {
-      "id": "turn_goto_commits",
-      "title": "reading: leader TURN rev7 + follower GOTO rev8",
-      "setup": "reading", "resolver": "work",
-      "steps": [
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "t1", "sessionId": "@session", "workEpoch": 1,
-          "baseRevision": 6, "type": "TURN",
-          "payload": {"delta": 1, "crossChapter": true}}},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "ACK", "requestId": "t1", "request": "TURN",
-           "sessionId": "@session", "data": {}},
-          {"v": 1, "type": "APPLIED", "sessionId": "@session",
-           "requestId": "t1", "revision": 7, "by": "leader"},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 7,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
-           "spreadId": "c0:s1", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": true}}}]},
-        {"op": "expect", "link": "L2", "frames": [
-          {"v": 1, "type": "APPLIED", "sessionId": "@session",
-           "requestId": "t1", "revision": 7, "by": "leader"},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 7,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
-           "spreadId": "c0:s1", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": true}}}]},
-        {"op": "send", "link": "L2", "frame": {
-          "v": 1, "requestId": "g1", "sessionId": "@session", "workEpoch": 1,
-          "baseRevision": 7, "type": "GOTO",
-          "payload": {"page": {"folder": "work", "name": "p005.png"}}}},
-        {"op": "expect", "link": "L2", "frames": [
-          {"v": 1, "type": "ACK", "requestId": "g1", "request": "GOTO",
-           "sessionId": "@session", "data": {}},
-          {"v": 1, "type": "APPLIED", "sessionId": "@session",
-           "requestId": "g1", "revision": 8, "by": "follower"},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 8,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
-           "spreadId": "c0:s2", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": true}}}]},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "APPLIED", "sessionId": "@session",
-           "requestId": "g1", "revision": 8, "by": "follower"},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 8,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
-           "spreadId": "c0:s2", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": true}}}]}
-      ]
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "c1",
+      "sessionId": null,
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "CREATE",
+      "payload": {}
+     }
     },
     {
-      "id": "dedup_replay_and_stale_rejects",
-      "title": "resend replays ACK; stale revision/epoch -> REJECT + snapshot",
-      "setup": "reading", "resolver": "work",
-      "steps": [
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "t1", "sessionId": "@session", "workEpoch": 1,
-          "baseRevision": 6, "type": "TURN",
-          "payload": {"delta": 1, "crossChapter": true}}},
-        {"op": "drain", "link": "L1"}, {"op": "drain", "link": "L2"},
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "t1", "sessionId": "@session", "workEpoch": 1,
-          "baseRevision": 6, "type": "TURN",
-          "payload": {"delta": 1, "crossChapter": true}}},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "ACK", "requestId": "t1", "request": "TURN",
-           "sessionId": "@session", "data": {}}]},
-        {"op": "expect", "link": "L2", "frames": []},
-        {"op": "send", "link": "L2", "frame": {
-          "v": 1, "requestId": "t2", "sessionId": "@session", "workEpoch": 1,
-          "baseRevision": 6, "type": "GOTO",
-          "payload": {"page": {"folder": "work", "name": "p003.png"}}}},
-        {"op": "expect", "link": "L2", "frames": [
-          {"v": 1, "type": "REJECT", "requestId": "t2", "request": "GOTO",
-           "reason": "stale_revision", "sessionId": "@session",
-           "snapshot": {"sessionId": "@session", "revision": 7,
-                        "workEpoch": 1, "manifestVersion": 1,
-                        "phase": "reading", "spreadId": "c0:s1",
-                        "offset": 0, "leaderSide": "left",
-                        "dataPlane": "server-ws"}}]},
-        {"op": "expect", "link": "L1", "frames": []},
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "g1", "sessionId": "@session", "workEpoch": 0,
-          "baseRevision": 7, "type": "GOTO",
-          "payload": {"page": {"folder": "work", "name": "p005.png"}}}},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "REJECT", "requestId": "g1", "request": "GOTO",
-           "reason": "stale_epoch", "sessionId": "@session",
-           "snapshot": {"sessionId": "@session", "revision": 7,
-                        "workEpoch": 1, "manifestVersion": 1,
-                        "phase": "reading", "spreadId": "c0:s1",
-                        "offset": 0, "leaderSide": "left",
-                        "dataPlane": "server-ws"}}]}
-      ]
+     "op": "drain",
+     "link": "L1"
     },
     {
-      "id": "transport_flip_server_ws_to_webrtc_dc_and_back",
-      "title": "both up -> webrtc-dc (STATE rev7 + TRANSPORT_STATE), one down -> back",
-      "setup": "reading", "resolver": "work",
-      "steps": [
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "u1", "sessionId": "@session", "workEpoch": 1,
-          "baseRevision": 6, "type": "TRANSPORT_STATE",
-          "payload": {"state": "up"}}},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "ACK", "requestId": "u1",
-           "request": "TRANSPORT_STATE", "sessionId": "@session",
-           "data": {}}]},
-        {"op": "expect", "link": "L2", "frames": []},
-        {"op": "send", "link": "L2", "frame": {
-          "v": 1, "requestId": "u2", "sessionId": "@session", "workEpoch": 1,
-          "baseRevision": 6, "type": "TRANSPORT_STATE",
-          "payload": {"state": "up"}}},
-        {"op": "expect", "link": "L2", "frames": [
-          {"v": 1, "type": "ACK", "requestId": "u2",
-           "request": "TRANSPORT_STATE", "sessionId": "@session",
-           "data": {}},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 7,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "webrtc-dc",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": true}}},
-          {"v": 1, "type": "TRANSPORT_STATE", "sessionId": "@session",
-           "dataPlane": "webrtc-dc", "revision": 7}]},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 7,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "webrtc-dc",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": true}}},
-          {"v": 1, "type": "TRANSPORT_STATE", "sessionId": "@session",
-           "dataPlane": "webrtc-dc", "revision": 7}]},
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "u3", "sessionId": "@session", "workEpoch": 1,
-          "baseRevision": 7, "type": "TRANSPORT_STATE",
-          "payload": {"state": "down"}}},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "ACK", "requestId": "u3",
-           "request": "TRANSPORT_STATE", "sessionId": "@session",
-           "data": {}},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 8,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": true}}},
-          {"v": 1, "type": "TRANSPORT_STATE", "sessionId": "@session",
-           "dataPlane": "server-ws", "revision": 8}]},
-        {"op": "expect", "link": "L2", "frames": [
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 8,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": true}}},
-          {"v": 1, "type": "TRANSPORT_STATE", "sessionId": "@session",
-           "dataPlane": "server-ws", "revision": 8}]}
-      ]
+     "op": "link",
+     "as": "L2",
+     "user": {
+      "email": "bob@example.com",
+      "name": "Bob",
+      "picture": ""
+     }
     },
     {
-      "id": "detach_resume_reloads_manifest",
-      "title": "detach -> paused/offline; RESUME -> manifest unicast -> READY -> reading",
-      "setup": "reading", "resolver": "work",
-      "steps": [
-        {"op": "detach", "link": "L2"},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 7,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "paused",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "offline",
-                            "name": "Bob", "ready": false}}}]},
-        {"op": "link", "as": "L3",
-         "user": {"email": "bob@example.com", "name": "Bob", "picture": ""}},
-        {"op": "expect", "link": "L3", "frames": [
-          {"v": 1, "type": "HELLO", "link": "@L3.link"}]},
-        {"op": "send", "link": "L3", "frame": {
-          "v": 1, "requestId": "r3", "sessionId": "@session", "workEpoch": 0,
-          "baseRevision": 0, "type": "RESUME",
-          "payload": {"memberId": "@L2.member",
-                      "resumeToken": "@L2.token"}}},
-        {"op": "expect", "link": "L3", "frames": [
-          {"v": 1, "type": "ACK", "requestId": "r3", "request": "RESUME",
-           "sessionId": "@session",
-           "data": {"sessionId": "@session", "memberId": "@L2.member",
-                    "role": "follower", "resumeToken": "@L2.token"}},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 8,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "loading",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": false}}},
-          {"v": 1, "kind": "manifest-chunk", "digest": "@digest",
-           "index": 0, "count": 1, "data": "@manifest.canonical",
-           "type": "MANIFEST", "sessionId": "@session",
-           "workEpoch": 1, "manifestVersion": 1}]},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 8,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "loading",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": false}}}]},
-        {"op": "send", "link": "L3", "frame": {
-          "v": 1, "requestId": "r4", "sessionId": "@session", "workEpoch": 1,
-          "baseRevision": 8, "type": "READY",
-          "payload": {"manifestVersion": 1}}},
-        {"op": "expect", "link": "L3", "frames": [
-          {"v": 1, "type": "ACK", "requestId": "r4", "request": "READY",
-           "sessionId": "@session", "data": {}},
-          {"v": 1, "type": "APPLIED", "sessionId": "@session",
-           "requestId": "r4", "revision": 9, "by": "follower"},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 9,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": true}}}]},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "APPLIED", "sessionId": "@session",
-           "requestId": "r4", "revision": 9, "by": "follower"},
-          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 9,
-           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
-           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
-           "dataPlane": "server-ws",
-           "presence": {
-             "@L1.member": {"role": "leader", "status": "active",
-                            "name": "Alice", "ready": true},
-             "@L2.member": {"role": "follower", "status": "active",
-                            "name": "Bob", "ready": true}}}]}
-      ]
+     "op": "drain",
+     "link": "L2"
     },
     {
-      "id": "leave_ends_session_for_all",
-      "title": "LEAVE -> END(reason=left) to every member, no ACK",
-      "setup": "pairing",
-      "steps": [
-        {"op": "send", "link": "L2", "frame": {
-          "v": 1, "requestId": "l1", "sessionId": "@session", "workEpoch": 0,
-          "baseRevision": 2, "type": "LEAVE", "payload": {}}},
-        {"op": "expect", "link": "L2", "frames": [
-          {"v": 1, "type": "END", "sessionId": "@session",
-           "reason": "left"}]},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "END", "sessionId": "@session",
-           "reason": "left"}]}
-      ]
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "j1",
+      "sessionId": null,
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "JOIN",
+      "payload": {
+       "code": "@code"
+      }
+     }
     },
     {
-      "id": "error_paths",
-      "title": "bad code / malformed / not_paired / no_pending REJECTs",
-      "steps": [
-        {"op": "link", "as": "X",
-         "user": {"email": "carol@example.com", "name": "Carol",
-                  "picture": ""}},
-        {"op": "drain", "link": "X"},
-        {"op": "send", "link": "X", "frame": {
-          "v": 1, "requestId": "jx", "sessionId": null, "workEpoch": 0,
-          "baseRevision": 0, "type": "JOIN", "payload": {"code": "999999"}}},
-        {"op": "expect", "link": "X", "frames": [
-          {"v": 1, "type": "REJECT", "requestId": "jx", "request": "JOIN",
-           "reason": "bad_code", "sessionId": null}]},
-        {"op": "send", "link": "X", "frame": {"v": 1, "requestId": "m1"}},
-        {"op": "expect", "link": "X", "frames": [
-          {"v": 1, "type": "REJECT", "requestId": "m1", "request": null,
-           "reason": "malformed", "sessionId": null}]},
-        {"op": "link", "as": "L1",
-         "user": {"email": "alice@example.com", "name": "Alice",
-                  "picture": ""}},
-        {"op": "drain", "link": "L1"},
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "c1", "sessionId": null, "workEpoch": 0,
-          "baseRevision": 0, "type": "CREATE", "payload": {}}},
-        {"op": "drain", "link": "L1"},
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "o1", "sessionId": "@session", "workEpoch": 0,
-          "baseRevision": 1, "type": "OPEN_WORK",
-          "payload": {"folder": "work",
-                      "page": {"folder": "work", "name": "p001.png"},
-                      "offset": 0}}},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "REJECT", "requestId": "o1",
-           "request": "OPEN_WORK", "reason": "not_paired",
-           "sessionId": null}]},
-        {"op": "send", "link": "L1", "frame": {
-          "v": 1, "requestId": "a9", "sessionId": "@session", "workEpoch": 0,
-          "baseRevision": 1, "type": "APPROVE",
-          "payload": {"memberId": "deadbeef"}}},
-        {"op": "expect", "link": "L1", "frames": [
-          {"v": 1, "type": "REJECT", "requestId": "a9", "request": "APPROVE",
-           "reason": "no_pending", "sessionId": "@session"}]}
-      ]
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "drain",
+     "link": "L2"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "a1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 1,
+      "type": "APPROVE",
+      "payload": {
+       "memberId": "@L2.member"
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "drain",
+     "link": "L2"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "o1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 2,
+      "type": "OPEN_WORK",
+      "payload": {
+       "folder": "work",
+       "page": {
+        "folder": "work",
+        "name": "p001.png"
+       },
+       "offset": 0
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "o1",
+       "request": "OPEN_WORK",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "o1",
+       "revision": 3,
+       "by": "leader"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 3,
+       "workEpoch": 0,
+       "manifestVersion": 0,
+       "phase": "loading",
+       "spreadId": null,
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ]
+      },
+      {
+       "v": 1,
+       "kind": "manifest-chunk",
+       "digest": "@digest",
+       "index": 0,
+       "count": 1,
+       "data": "@manifest.canonical",
+       "type": "MANIFEST",
+       "sessionId": "@session",
+       "workEpoch": 1,
+       "manifestVersion": 1
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 4,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "loading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "r1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 4,
+      "type": "READY",
+      "payload": {
+       "manifestVersion": 1
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "o1",
+       "revision": 3,
+       "by": "leader"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 3,
+       "workEpoch": 0,
+       "manifestVersion": 0,
+       "phase": "loading",
+       "spreadId": null,
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ]
+      },
+      {
+       "v": 1,
+       "kind": "manifest-chunk",
+       "digest": "@digest",
+       "index": 0,
+       "count": 1,
+       "data": "@manifest.canonical",
+       "type": "MANIFEST",
+       "sessionId": "@session",
+       "workEpoch": 1,
+       "manifestVersion": 1
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 4,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "loading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      },
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "r1",
+       "revision": 5,
+       "by": "leader"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 5,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "loading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "r1",
+       "request": "READY",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "r1",
+       "revision": 5,
+       "by": "leader"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 5,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "loading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "r2",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 5,
+      "type": "READY",
+      "payload": {
+       "manifestVersion": 1
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "r2",
+       "request": "READY",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "r2",
+       "revision": 6,
+       "by": "follower"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 6,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "reading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "r2",
+       "revision": 6,
+       "by": "follower"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 6,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "reading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
     }
-  ]
+   ]
+  },
+  {
+   "id": "turn_goto_commits",
+   "title": "reading: leader TURN rev7 + follower GOTO rev8",
+   "setup": "reading",
+   "resolver": "work",
+   "steps": [
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "t1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "TURN",
+      "payload": {
+       "delta": 1,
+       "crossChapter": true
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "t1",
+       "request": "TURN",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "t1",
+       "revision": 7,
+       "by": "leader"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 7,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "reading",
+       "spreadId": "c0:s1",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "t1",
+       "revision": 7,
+       "by": "leader"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 7,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "reading",
+       "spreadId": "c0:s1",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "g1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 7,
+      "type": "GOTO",
+      "payload": {
+       "page": {
+        "folder": "work",
+        "name": "p005.png"
+       }
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "g1",
+       "request": "GOTO",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "g1",
+       "revision": 8,
+       "by": "follower"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 8,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "reading",
+       "spreadId": "c0:s2",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "g1",
+       "revision": 8,
+       "by": "follower"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 8,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "reading",
+       "spreadId": "c0:s2",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "dedup_replay_and_stale_rejects",
+   "title": "resend replays ACK; stale revision/epoch -> REJECT + snapshot",
+   "setup": "reading",
+   "resolver": "work",
+   "steps": [
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "t1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "TURN",
+      "payload": {
+       "delta": 1,
+       "crossChapter": true
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "drain",
+     "link": "L2"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "t1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "TURN",
+      "payload": {
+       "delta": 1,
+       "crossChapter": true
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "t1",
+       "request": "TURN",
+       "sessionId": "@session",
+       "data": {}
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": []
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "t2",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "GOTO",
+      "payload": {
+       "page": {
+        "folder": "work",
+        "name": "p003.png"
+       }
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "t2",
+       "request": "GOTO",
+       "reason": "stale_revision",
+       "sessionId": "@session",
+       "snapshot": {
+        "sessionId": "@session",
+        "revision": 7,
+        "workEpoch": 1,
+        "manifestVersion": 1,
+        "phase": "reading",
+        "spreadId": "c0:s1",
+        "offset": 0,
+        "leaderSide": "left",
+        "dataPlane": "server-ws",
+        "features": [
+         "member-drive-v1"
+        ],
+        "presence": {
+         "@L1.member": {
+          "role": "leader",
+          "status": "active",
+          "name": "Alice",
+          "ready": true,
+          "trust": "member",
+          "features": []
+         },
+         "@L2.member": {
+          "role": "follower",
+          "status": "active",
+          "name": "Bob",
+          "ready": true,
+          "trust": "member",
+          "features": []
+         }
+        },
+        "browse": false,
+        "browseGeneration": 1
+       }
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": []
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "g1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 7,
+      "type": "GOTO",
+      "payload": {
+       "page": {
+        "folder": "work",
+        "name": "p005.png"
+       }
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "g1",
+       "request": "GOTO",
+       "reason": "stale_epoch",
+       "sessionId": "@session",
+       "snapshot": {
+        "sessionId": "@session",
+        "revision": 7,
+        "workEpoch": 1,
+        "manifestVersion": 1,
+        "phase": "reading",
+        "spreadId": "c0:s1",
+        "offset": 0,
+        "leaderSide": "left",
+        "dataPlane": "server-ws",
+        "features": [
+         "member-drive-v1"
+        ],
+        "presence": {
+         "@L1.member": {
+          "role": "leader",
+          "status": "active",
+          "name": "Alice",
+          "ready": true,
+          "trust": "member",
+          "features": []
+         },
+         "@L2.member": {
+          "role": "follower",
+          "status": "active",
+          "name": "Bob",
+          "ready": true,
+          "trust": "member",
+          "features": []
+         }
+        },
+        "browse": false,
+        "browseGeneration": 1
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "transport_flip_server_ws_to_webrtc_dc_and_back",
+   "title": "both up -> webrtc-dc (STATE rev7 + TRANSPORT_STATE), one down -> back",
+   "setup": "reading",
+   "resolver": "work",
+   "steps": [
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "u1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "TRANSPORT_STATE",
+      "payload": {
+       "state": "up"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "u1",
+       "request": "TRANSPORT_STATE",
+       "sessionId": "@session",
+       "data": {}
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": []
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "u2",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "TRANSPORT_STATE",
+      "payload": {
+       "state": "up"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "u2",
+       "request": "TRANSPORT_STATE",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 7,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "reading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "webrtc-dc",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      },
+      {
+       "v": 1,
+       "type": "TRANSPORT_STATE",
+       "sessionId": "@session",
+       "dataPlane": "webrtc-dc",
+       "revision": 7
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 7,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "reading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "webrtc-dc",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      },
+      {
+       "v": 1,
+       "type": "TRANSPORT_STATE",
+       "sessionId": "@session",
+       "dataPlane": "webrtc-dc",
+       "revision": 7
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "u3",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 7,
+      "type": "TRANSPORT_STATE",
+      "payload": {
+       "state": "down"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "u3",
+       "request": "TRANSPORT_STATE",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 8,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "reading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      },
+      {
+       "v": 1,
+       "type": "TRANSPORT_STATE",
+       "sessionId": "@session",
+       "dataPlane": "server-ws",
+       "revision": 8
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 8,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "reading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      },
+      {
+       "v": 1,
+       "type": "TRANSPORT_STATE",
+       "sessionId": "@session",
+       "dataPlane": "server-ws",
+       "revision": 8
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "detach_resume_reloads_manifest",
+   "title": "detach -> paused/offline; RESUME -> manifest unicast -> READY -> reading",
+   "setup": "reading",
+   "resolver": "work",
+   "steps": [
+    {
+     "op": "detach",
+     "link": "L2"
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 7,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "paused",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "offline",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
+    },
+    {
+     "op": "link",
+     "as": "L3",
+     "user": {
+      "email": "bob@example.com",
+      "name": "Bob",
+      "picture": ""
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L3",
+     "frames": [
+      {
+       "v": 1,
+       "type": "HELLO",
+       "link": "@L3.link",
+       "features": [
+        "member-drive-v1"
+       ]
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L3",
+     "frame": {
+      "v": 1,
+      "requestId": "r3",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "RESUME",
+      "payload": {
+       "memberId": "@L2.member",
+       "resumeToken": "@L2.token"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L3",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "r3",
+       "request": "RESUME",
+       "sessionId": "@session",
+       "data": {
+        "sessionId": "@session",
+        "memberId": "@L2.member",
+        "role": "follower",
+        "resumeToken": "@L2.token",
+        "trust": "member",
+        "features": [
+         "member-drive-v1"
+        ]
+       }
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 8,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "loading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      },
+      {
+       "v": 1,
+       "kind": "manifest-chunk",
+       "digest": "@digest",
+       "index": 0,
+       "count": 1,
+       "data": "@manifest.canonical",
+       "type": "MANIFEST",
+       "sessionId": "@session",
+       "workEpoch": 1,
+       "manifestVersion": 1
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 8,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "loading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L3",
+     "frame": {
+      "v": 1,
+      "requestId": "r4",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 8,
+      "type": "READY",
+      "payload": {
+       "manifestVersion": 1
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L3",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "r4",
+       "request": "READY",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "r4",
+       "revision": 9,
+       "by": "follower"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 9,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "reading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "r4",
+       "revision": 9,
+       "by": "follower"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 9,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "reading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": []
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "leave_ends_session_for_all",
+   "title": "LEAVE -> END(reason=left) to every member, no ACK",
+   "setup": "pairing",
+   "steps": [
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "l1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 2,
+      "type": "LEAVE",
+      "payload": {}
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "END",
+       "sessionId": "@session",
+       "reason": "left"
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "END",
+       "sessionId": "@session",
+       "reason": "left"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "error_paths",
+   "title": "bad code / malformed / not_paired / no_pending REJECTs",
+   "steps": [
+    {
+     "op": "link",
+     "as": "X",
+     "user": {
+      "email": "carol@example.com",
+      "name": "Carol",
+      "picture": ""
+     }
+    },
+    {
+     "op": "drain",
+     "link": "X"
+    },
+    {
+     "op": "send",
+     "link": "X",
+     "frame": {
+      "v": 1,
+      "requestId": "jx",
+      "sessionId": null,
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "JOIN",
+      "payload": {
+       "code": "999999"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "X",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "jx",
+       "request": "JOIN",
+       "reason": "bad_code",
+       "sessionId": null
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "X",
+     "frame": {
+      "v": 1,
+      "requestId": "m1"
+     }
+    },
+    {
+     "op": "expect",
+     "link": "X",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "m1",
+       "request": null,
+       "reason": "malformed",
+       "sessionId": null
+      }
+     ]
+    },
+    {
+     "op": "link",
+     "as": "L1",
+     "user": {
+      "email": "alice@example.com",
+      "name": "Alice",
+      "picture": ""
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "c1",
+      "sessionId": null,
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "CREATE",
+      "payload": {}
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "o1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 1,
+      "type": "OPEN_WORK",
+      "payload": {
+       "folder": "work",
+       "page": {
+        "folder": "work",
+        "name": "p001.png"
+       },
+       "offset": 0
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "o1",
+       "request": "OPEN_WORK",
+       "reason": "not_paired",
+       "sessionId": null
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "a9",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 1,
+      "type": "APPROVE",
+      "payload": {
+       "memberId": "deadbeef"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "a9",
+       "request": "APPROVE",
+       "reason": "no_pending",
+       "sessionId": "@session"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "member_follower_open_work_direct_accept",
+   "title": "member-drive capability: follower member OPEN_WORK direct is accepted",
+   "setup": "pairing",
+   "resolver": "work",
+   "features": {
+    "L1": [
+     "member-drive-v1"
+    ],
+    "L2": [
+     "member-drive-v1"
+    ]
+   },
+   "steps": [
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "mfow1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "OPEN_WORK",
+      "payload": {
+       "folder": "work",
+       "page": {
+        "folder": "work",
+        "name": "p001.png"
+       },
+       "offset": 0
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "mfow1",
+       "request": "OPEN_WORK",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "mfow1",
+       "revision": 3,
+       "by": "follower"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 3,
+       "workEpoch": 0,
+       "manifestVersion": 0,
+       "phase": "loading",
+       "spreadId": null,
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": false,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ]
+      },
+      {
+       "v": 1,
+       "kind": "manifest-chunk",
+       "digest": "@digest",
+       "index": 0,
+       "count": 1,
+       "data": "@manifest.canonical",
+       "type": "MANIFEST",
+       "sessionId": "@session",
+       "workEpoch": 1,
+       "manifestVersion": 1
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 4,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "loading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": false,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    }
+   ]
+  },
+  {
+   "id": "member_follower_open_work_relay_accept",
+   "title": "member-drive capability: leader may relay follower OPEN_WORK; origin owns the response",
+   "setup": "pairing",
+   "resolver": "work",
+   "features": {
+    "L1": [
+     "member-drive-v1"
+    ],
+    "L2": [
+     "member-drive-v1"
+    ]
+   },
+   "steps": [
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "mfowr1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "OPEN_WORK",
+      "payload": {
+       "folder": "work",
+       "page": {
+        "folder": "work",
+        "name": "p001.png"
+       },
+       "offset": 0,
+       "origin": "follower"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "mfowr1",
+       "request": "OPEN_WORK",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "mfowr1",
+       "revision": 3,
+       "by": "follower"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 3,
+       "workEpoch": 0,
+       "manifestVersion": 0,
+       "phase": "loading",
+       "spreadId": null,
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": false,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ]
+      },
+      {
+       "v": 1,
+       "kind": "manifest-chunk",
+       "digest": "@digest",
+       "index": 0,
+       "count": 1,
+       "data": "@manifest.canonical",
+       "type": "MANIFEST",
+       "sessionId": "@session",
+       "workEpoch": 1,
+       "manifestVersion": 1
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 4,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "loading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": false,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 1
+      }
+     ]
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    }
+   ]
+  },
+  {
+   "id": "guest_open_work_direct_and_leader_relay_reject",
+   "title": "guest trust is immutable: direct and member-leader-relayed OPEN_WORK both reject",
+   "resolver": "work",
+   "steps": [
+    {
+     "op": "link",
+     "as": "L1",
+     "user": {
+      "email": "alice@example.com",
+      "name": "Alice",
+      "picture": ""
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "gc1",
+      "sessionId": null,
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "CREATE",
+      "payload": {
+       "features": [
+        "member-drive-v1"
+       ]
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "link",
+     "as": "G",
+     "user": {
+      "email": "alice@example.com",
+      "name": "ゲスト",
+      "picture": ""
+     },
+     "guestToken": "@L1.guestToken"
+    },
+    {
+     "op": "drain",
+     "link": "G"
+    },
+    {
+     "op": "send",
+     "link": "G",
+     "frame": {
+      "v": 1,
+      "requestId": "gj1",
+      "sessionId": null,
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "JOIN",
+      "payload": {
+       "guestToken": "@L1.guestToken",
+       "features": [
+        "member-drive-v1"
+       ]
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "drain",
+     "link": "G"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "ga1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 1,
+      "type": "APPROVE",
+      "payload": {
+       "memberId": "@G.member"
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "drain",
+     "link": "G"
+    },
+    {
+     "op": "send",
+     "link": "G",
+     "frame": {
+      "v": 1,
+      "requestId": "gdirect1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "OPEN_WORK",
+      "payload": {
+       "folder": "work",
+       "page": {
+        "folder": "work",
+        "name": "p001.png"
+       },
+       "offset": 0
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "G",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "gdirect1",
+       "request": "OPEN_WORK",
+       "reason": "forbidden",
+       "sessionId": "@session",
+       "snapshot": {
+        "sessionId": "@session",
+        "revision": 2,
+        "workEpoch": 0,
+        "manifestVersion": 0,
+        "phase": "selecting",
+        "spreadId": null,
+        "offset": 0,
+        "leaderSide": "left",
+        "dataPlane": "server-ws",
+        "features": [
+         "member-drive-v1"
+        ],
+        "presence": {
+         "@L1.member": {
+          "role": "leader",
+          "status": "active",
+          "name": "Alice",
+          "ready": false,
+          "trust": "member",
+          "features": [
+           "member-drive-v1"
+          ]
+         },
+         "@G.member": {
+          "role": "follower",
+          "status": "active",
+          "name": "ゲスト",
+          "ready": false,
+          "trust": "guest",
+          "features": [
+           "member-drive-v1"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "grelay1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "OPEN_WORK",
+      "payload": {
+       "folder": "work",
+       "page": {
+        "folder": "work",
+        "name": "p001.png"
+       },
+       "offset": 0,
+       "origin": "follower"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "G",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "grelay1",
+       "request": "OPEN_WORK",
+       "reason": "forbidden",
+       "sessionId": "@session",
+       "snapshot": {
+        "sessionId": "@session",
+        "revision": 2,
+        "workEpoch": 0,
+        "manifestVersion": 0,
+        "phase": "selecting",
+        "spreadId": null,
+        "offset": 0,
+        "leaderSide": "left",
+        "dataPlane": "server-ws",
+        "features": [
+         "member-drive-v1"
+        ],
+        "presence": {
+         "@L1.member": {
+          "role": "leader",
+          "status": "active",
+          "name": "Alice",
+          "ready": false,
+          "trust": "member",
+          "features": [
+           "member-drive-v1"
+          ]
+         },
+         "@G.member": {
+          "role": "follower",
+          "status": "active",
+          "name": "ゲスト",
+          "ready": false,
+          "trust": "guest",
+          "features": [
+           "member-drive-v1"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    }
+   ]
+  },
+  {
+   "id": "relay_origin_control_frame_reject",
+   "title": "payload.origin is whitelisted to sequenced data-plane ops only",
+   "setup": "pairing",
+   "features": {
+    "L1": [
+     "member-drive-v1"
+    ],
+    "L2": [
+     "member-drive-v1"
+    ]
+   },
+   "steps": [
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "ctl1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 2,
+      "type": "SET_ACTIVITY",
+      "payload": {
+       "state": "selecting",
+       "origin": "follower"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "ctl1",
+       "request": "SET_ACTIVITY",
+       "reason": "bad_origin",
+       "sessionId": "@session"
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "ctl2",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 2,
+      "type": "SIGNAL",
+      "payload": {
+       "kind": "offer",
+       "data": {
+        "sdp": "x"
+       },
+       "origin": "follower"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "ctl2",
+       "request": "SIGNAL",
+       "reason": "bad_origin",
+       "sessionId": "@session"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "shared_browse_open_close_suspend_matrix",
+   "title": "shared browse: either member opens/closes; duplicate opens idempotent; suspend is not close",
+   "setup": "reading",
+   "resolver": "work",
+   "features": {
+    "L1": [
+     "member-drive-v1"
+    ],
+    "L2": [
+     "member-drive-v1"
+    ]
+   },
+   "steps": [
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "bo1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "SET_ACTIVITY",
+      "payload": {
+       "state": "selecting"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "bo1",
+       "request": "SET_ACTIVITY",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 7,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "selecting",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "browse": true,
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browseGeneration": 2,
+       "browseOpener": "@L2.member",
+       "browseOpenerRole": "follower"
+      }
+     ]
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "bc1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 7,
+      "type": "SET_ACTIVITY",
+      "payload": {
+       "state": "active",
+       "endBrowse": true
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "bc1",
+       "request": "SET_ACTIVITY",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 8,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "reading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 3
+      }
+     ]
+    },
+    {
+     "op": "drain",
+     "link": "L2"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "bo2",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 8,
+      "type": "SET_ACTIVITY",
+      "payload": {
+       "state": "selecting"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "bo2",
+       "request": "SET_ACTIVITY",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 9,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "selecting",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "browse": true,
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browseGeneration": 4,
+       "browseOpener": "@L1.member",
+       "browseOpenerRole": "leader"
+      }
+     ]
+    },
+    {
+     "op": "drain",
+     "link": "L2"
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "bc2",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 9,
+      "type": "SET_ACTIVITY",
+      "payload": {
+       "state": "active",
+       "endBrowse": true
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "bc2",
+       "request": "SET_ACTIVITY",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 10,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "reading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 5
+      }
+     ]
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "bo3",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 10,
+      "type": "SET_ACTIVITY",
+      "payload": {
+       "state": "selecting"
+      }
+     }
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "bo4",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 11,
+      "type": "SET_ACTIVITY",
+      "payload": {
+       "state": "selecting"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "bo3",
+       "request": "SET_ACTIVITY",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 11,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "selecting",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "browse": true,
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browseGeneration": 6,
+       "browseOpener": "@L2.member",
+       "browseOpenerRole": "follower"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 12,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "selecting",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "browse": true,
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browseGeneration": 6,
+       "browseOpener": "@L2.member",
+       "browseOpenerRole": "follower"
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 11,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "selecting",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "browse": true,
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browseGeneration": 6,
+       "browseOpener": "@L2.member",
+       "browseOpenerRole": "follower"
+      },
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "bo4",
+       "request": "SET_ACTIVITY",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 12,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "selecting",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "browse": true,
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browseGeneration": 6,
+       "browseOpener": "@L2.member",
+       "browseOpenerRole": "follower"
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "bs1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 12,
+      "type": "SET_ACTIVITY",
+      "payload": {
+       "state": "suspended"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "bs1",
+       "request": "SET_ACTIVITY",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 13,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "paused",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "browse": true,
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "suspended",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browseGeneration": 6,
+       "browseOpener": "@L2.member",
+       "browseOpenerRole": "follower"
+      }
+     ]
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "bs2",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 13,
+      "type": "SET_ACTIVITY",
+      "payload": {
+       "state": "active"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "bs2",
+       "request": "SET_ACTIVITY",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 14,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "selecting",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "browse": true,
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browseGeneration": 6,
+       "browseOpener": "@L2.member",
+       "browseOpenerRole": "follower"
+      }
+     ]
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "bc3",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 14,
+      "type": "SET_ACTIVITY",
+      "payload": {
+       "state": "active",
+       "endBrowse": true
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "drain",
+     "link": "L2"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "bg1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 0,
+      "type": "GOTO",
+      "payload": {
+       "page": {
+        "folder": "work",
+        "name": "p003.png"
+       }
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "bg1",
+       "request": "GOTO",
+       "reason": "stale_revision",
+       "sessionId": "@session",
+       "snapshot": {
+        "sessionId": "@session",
+        "revision": 15,
+        "workEpoch": 1,
+        "manifestVersion": 1,
+        "phase": "reading",
+        "spreadId": "c0:s0",
+        "offset": 0,
+        "leaderSide": "left",
+        "dataPlane": "server-ws",
+        "features": [
+         "member-drive-v1"
+        ],
+        "presence": {
+         "@L1.member": {
+          "role": "leader",
+          "status": "active",
+          "name": "Alice",
+          "ready": true,
+          "trust": "member",
+          "features": [
+           "member-drive-v1"
+          ]
+         },
+         "@L2.member": {
+          "role": "follower",
+          "status": "active",
+          "name": "Bob",
+          "ready": true,
+          "trust": "member",
+          "features": [
+           "member-drive-v1"
+          ]
+         }
+        },
+        "browse": false,
+        "browseGeneration": 7
+       }
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": []
+    }
+   ]
+  },
+  {
+   "id": "shared_browse_offline_opener_peer_close_resume",
+   "title": "shared browse: peer may close even while opener is offline; resume observes closed state",
+   "setup": "reading",
+   "resolver": "work",
+   "features": {
+    "L1": [
+     "member-drive-v1"
+    ],
+    "L2": [
+     "member-drive-v1"
+    ]
+   },
+   "steps": [
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "oo1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "SET_ACTIVITY",
+      "payload": {
+       "state": "selecting"
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L2"
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "detach",
+     "link": "L2"
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "oc1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 8,
+      "type": "SET_ACTIVITY",
+      "payload": {
+       "state": "active",
+       "endBrowse": true
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "link",
+     "as": "L2b",
+     "user": {
+      "email": "bob@example.com",
+      "name": "Bob",
+      "picture": ""
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L2b"
+    },
+    {
+     "op": "send",
+     "link": "L2b",
+     "frame": {
+      "v": 1,
+      "requestId": "or1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "RESUME",
+      "payload": {
+       "memberId": "@L2.member",
+       "resumeToken": "@L2.token",
+       "features": [
+        "member-drive-v1"
+       ]
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2b",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "or1",
+       "request": "RESUME",
+       "sessionId": "@session",
+       "data": {
+        "sessionId": "@session",
+        "memberId": "@L2.member",
+        "role": "follower",
+        "trust": "member",
+        "resumeToken": "@L2.token",
+        "features": [
+         "member-drive-v1"
+        ]
+       }
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 10,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "loading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": false,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 3
+      },
+      {
+       "v": 1,
+       "kind": "manifest-chunk",
+       "digest": "@digest",
+       "index": 0,
+       "count": 1,
+       "data": "@manifest.canonical",
+       "type": "MANIFEST",
+       "sessionId": "@session",
+       "workEpoch": 1,
+       "manifestVersion": 1
+      }
+     ]
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    }
+   ]
+  },
+  {
+   "id": "shared_browse_open_work_commit_ends",
+   "title": "shared browse: a committed OPEN_WORK ends selecting even without endBrowse",
+   "setup": "reading",
+   "resolver": "work",
+   "features": {
+    "L1": [
+     "member-drive-v1"
+    ],
+    "L2": [
+     "member-drive-v1"
+    ]
+   },
+   "steps": [
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "co1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "SET_ACTIVITY",
+      "payload": {
+       "state": "selecting"
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L2"
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "co2",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 7,
+      "type": "OPEN_WORK",
+      "payload": {
+       "folder": "work",
+       "page": {
+        "folder": "work",
+        "name": "p001.png"
+       },
+       "offset": 0
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L2"
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "cr1",
+      "sessionId": "@session",
+      "workEpoch": 2,
+      "baseRevision": 9,
+      "type": "READY",
+      "payload": {
+       "manifestVersion": 2
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "drain",
+     "link": "L2"
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "cr2",
+      "sessionId": "@session",
+      "workEpoch": 2,
+      "baseRevision": 10,
+      "type": "READY",
+      "payload": {
+       "manifestVersion": 2
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "cr2",
+       "request": "READY",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "APPLIED",
+       "sessionId": "@session",
+       "requestId": "cr2",
+       "revision": 11,
+       "by": "follower"
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 11,
+       "workEpoch": 2,
+       "manifestVersion": 2,
+       "phase": "reading",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browse": false,
+       "browseGeneration": 3
+      }
+     ]
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    }
+   ]
+  },
+  {
+   "id": "bootstrap_auto_committed_deliberate_pick_reject",
+   "title": "bootstrap auto:true is stale once a deliberate non-auto load has committed",
+   "setup": "reading",
+   "resolver": "work",
+   "features": {
+    "L1": [
+     "member-drive-v1"
+    ],
+    "L2": [
+     "member-drive-v1"
+    ]
+   },
+   "steps": [
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "auto1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "OPEN_WORK",
+      "payload": {
+       "folder": "work",
+       "page": {
+        "folder": "work",
+        "name": "p001.png"
+       },
+       "offset": 0,
+       "auto": true
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "auto1",
+       "request": "OPEN_WORK",
+       "reason": "stale_request",
+       "sessionId": "@session",
+       "snapshot": {
+        "sessionId": "@session",
+        "revision": 6,
+        "workEpoch": 1,
+        "manifestVersion": 1,
+        "phase": "reading",
+        "spreadId": "c0:s0",
+        "offset": 0,
+        "leaderSide": "left",
+        "dataPlane": "server-ws",
+        "features": [
+         "member-drive-v1"
+        ],
+        "presence": {
+         "@L1.member": {
+          "role": "leader",
+          "status": "active",
+          "name": "Alice",
+          "ready": true,
+          "trust": "member",
+          "features": [
+           "member-drive-v1"
+          ]
+         },
+         "@L2.member": {
+          "role": "follower",
+          "status": "active",
+          "name": "Bob",
+          "ready": true,
+          "trust": "member",
+          "features": [
+           "member-drive-v1"
+          ]
+         }
+        },
+        "browse": false,
+        "browseGeneration": 1
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "resume_trust_class_match",
+   "title": "RESUME requires stored member trust to match the link authentication class",
+   "steps": [
+    {
+     "op": "link",
+     "as": "L1",
+     "user": {
+      "email": "alice@example.com",
+      "name": "Alice",
+      "picture": ""
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "tc1",
+      "sessionId": null,
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "CREATE",
+      "payload": {
+       "features": [
+        "member-drive-v1"
+       ]
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "link",
+     "as": "G",
+     "user": {
+      "email": "alice@example.com",
+      "name": "ゲスト",
+      "picture": ""
+     },
+     "guestToken": "@L1.guestToken"
+    },
+    {
+     "op": "drain",
+     "link": "G"
+    },
+    {
+     "op": "send",
+     "link": "G",
+     "frame": {
+      "v": 1,
+      "requestId": "tj1",
+      "sessionId": null,
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "JOIN",
+      "payload": {
+       "guestToken": "@L1.guestToken",
+       "features": [
+        "member-drive-v1"
+       ]
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "drain",
+     "link": "G"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "ta1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 1,
+      "type": "APPROVE",
+      "payload": {
+       "memberId": "@G.member"
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "drain",
+     "link": "G"
+    },
+    {
+     "op": "detach",
+     "link": "G"
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "link",
+     "as": "GM",
+     "user": {
+      "email": "mallory@example.com",
+      "name": "Mallory",
+      "picture": ""
+     }
+    },
+    {
+     "op": "drain",
+     "link": "GM"
+    },
+    {
+     "op": "send",
+     "link": "GM",
+     "frame": {
+      "v": 1,
+      "requestId": "trbad1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "RESUME",
+      "payload": {
+       "memberId": "@G.member",
+       "resumeToken": "@G.token",
+       "features": [
+        "member-drive-v1"
+       ]
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "GM",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "trbad1",
+       "request": "RESUME",
+       "reason": "trust_mismatch",
+       "sessionId": "@session"
+      }
+     ]
+    },
+    {
+     "op": "link",
+     "as": "G2",
+     "user": {
+      "email": "alice@example.com",
+      "name": "ゲスト",
+      "picture": ""
+     },
+     "guestToken": "@L1.guestToken"
+    },
+    {
+     "op": "drain",
+     "link": "G2"
+    },
+    {
+     "op": "send",
+     "link": "G2",
+     "frame": {
+      "v": 1,
+      "requestId": "trgood1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 0,
+      "type": "RESUME",
+      "payload": {
+       "memberId": "@G.member",
+       "resumeToken": "@G.token",
+       "features": [
+        "member-drive-v1"
+       ]
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "G2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "trgood1",
+       "request": "RESUME",
+       "sessionId": "@session",
+       "data": {
+        "sessionId": "@session",
+        "memberId": "@G.member",
+        "role": "follower",
+        "trust": "guest",
+        "resumeToken": "@G.token",
+        "features": [
+         "member-drive-v1"
+        ]
+       }
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 4,
+       "workEpoch": 0,
+       "manifestVersion": 0,
+       "phase": "selecting",
+       "spreadId": null,
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": false,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@G.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "ゲスト",
+         "ready": false,
+         "trust": "guest",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ]
+      }
+     ]
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    }
+   ]
+  },
+  {
+   "id": "open_work_replay_after_manifest_commit_replays_ack",
+   "title": "post-commit resend of the triggering OPEN_WORK replays its ACK without re-loading",
+   "setup": "reading",
+   "resolver": "work",
+   "steps": [
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "o1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 2,
+      "type": "OPEN_WORK",
+      "payload": {
+       "folder": "work",
+       "page": {
+        "folder": "work",
+        "name": "p001.png"
+       },
+       "offset": 0
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "o1",
+       "request": "OPEN_WORK",
+       "sessionId": "@session",
+       "data": {}
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": []
+    }
+   ]
+  },
+  {
+   "id": "follower_origin_leader_reject",
+   "title": "follower cannot use payload.origin leader on sequenced ops",
+   "setup": "reading",
+   "resolver": "work",
+   "steps": [
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "fol-t1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "TURN",
+      "payload": {
+       "delta": 1,
+       "crossChapter": true,
+       "origin": "leader"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "fol-t1",
+       "request": "TURN",
+       "reason": "bad_origin",
+       "sessionId": "@session",
+       "snapshot": {
+        "sessionId": "@session",
+        "revision": 6,
+        "workEpoch": 1,
+        "manifestVersion": 1,
+        "phase": "reading",
+        "spreadId": "c0:s0",
+        "offset": 0,
+        "leaderSide": "left",
+        "dataPlane": "server-ws",
+        "features": [
+         "member-drive-v1"
+        ],
+        "presence": {
+         "@L1.member": {
+          "role": "leader",
+          "status": "active",
+          "name": "Alice",
+          "ready": true,
+          "trust": "member",
+          "features": []
+         },
+         "@L2.member": {
+          "role": "follower",
+          "status": "active",
+          "name": "Bob",
+          "ready": true,
+          "trust": "member",
+          "features": []
+         }
+        },
+        "browse": false,
+        "browseGeneration": 1
+       }
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": []
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "fol-o1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "OPEN_WORK",
+      "payload": {
+       "folder": "work",
+       "page": {
+        "folder": "work",
+        "name": "p001.png"
+       },
+       "offset": 0,
+       "origin": "leader"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "fol-o1",
+       "request": "OPEN_WORK",
+       "reason": "bad_origin",
+       "sessionId": "@session",
+       "snapshot": {
+        "sessionId": "@session",
+        "revision": 6,
+        "workEpoch": 1,
+        "manifestVersion": 1,
+        "phase": "reading",
+        "spreadId": "c0:s0",
+        "offset": 0,
+        "leaderSide": "left",
+        "dataPlane": "server-ws",
+        "features": [
+         "member-drive-v1"
+        ],
+        "presence": {
+         "@L1.member": {
+          "role": "leader",
+          "status": "active",
+          "name": "Alice",
+          "ready": true,
+          "trust": "member",
+          "features": []
+         },
+         "@L2.member": {
+          "role": "follower",
+          "status": "active",
+          "name": "Bob",
+          "ready": true,
+          "trust": "member",
+          "features": []
+         }
+        },
+        "browse": false,
+        "browseGeneration": 1
+       }
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": []
+    }
+   ]
+  },
+  {
+   "id": "superseded_open_work_replay_after_commit_stale",
+   "title": "post-commit resend of a superseded OPEN_WORK is tombstoned, not replayed as accepted",
+   "setup": "reading",
+   "resolver": "work",
+   "steps": [
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "sup1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "OPEN_WORK",
+      "payload": {
+       "folder": "work",
+       "page": {
+        "folder": "work",
+        "name": "p001.png"
+       },
+       "offset": 0
+      }
+     }
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "sup2",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "OPEN_WORK",
+      "payload": {
+       "folder": "work",
+       "page": {
+        "folder": "work",
+        "name": "p001.png"
+       },
+       "offset": 0
+      }
+     }
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "drain",
+     "link": "L2"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "sup1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "OPEN_WORK",
+      "payload": {
+       "folder": "work",
+       "page": {
+        "folder": "work",
+        "name": "p001.png"
+       },
+       "offset": 0
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "sup1",
+       "request": "OPEN_WORK",
+       "reason": "stale_request",
+       "sessionId": "@session",
+       "snapshot": {
+        "sessionId": "@session",
+        "revision": 9,
+        "workEpoch": 2,
+        "manifestVersion": 2,
+        "phase": "loading",
+        "spreadId": "c0:s0",
+        "offset": 0,
+        "leaderSide": "left",
+        "dataPlane": "server-ws",
+        "features": [
+         "member-drive-v1"
+        ],
+        "presence": {
+         "@L1.member": {
+          "role": "leader",
+          "status": "active",
+          "name": "Alice",
+          "ready": false,
+          "trust": "member",
+          "features": []
+         },
+         "@L2.member": {
+          "role": "follower",
+          "status": "active",
+          "name": "Bob",
+          "ready": false,
+          "trust": "member",
+          "features": []
+         }
+        },
+        "browse": false,
+        "browseGeneration": 2
+       }
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": []
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "sup2",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "OPEN_WORK",
+      "payload": {
+       "folder": "work",
+       "page": {
+        "folder": "work",
+        "name": "p001.png"
+       },
+       "offset": 0
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "sup2",
+       "request": "OPEN_WORK",
+       "sessionId": "@session",
+       "data": {}
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": []
+    }
+   ]
+  },
+  {
+   "id": "ui_sync_browse_gate_and_generation_relay",
+   "title": "UI_SYNC: post-commit casual frames are generation-tagged — untagged frames drop once a generation exists (pre-commit straggler protection); matching generation relays in closed and open browse alike; mismatch drops; malformed/null tags are malformed",
+   "setup": "reading",
+   "resolver": "work",
+   "features": {
+    "L1": [
+     "member-drive-v1"
+    ],
+    "L2": [
+     "member-drive-v1"
+    ]
+   },
+   "steps": [
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "uc1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 7,
+      "type": "UI_SYNC",
+      "payload": {
+       "view": "browse",
+       "path": null,
+       "top": 5,
+       "viewH": 100,
+       "mode": "tile"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": []
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": []
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "uc2",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 7,
+      "type": "UI_SYNC",
+      "payload": {
+       "view": "browse",
+       "path": null,
+       "top": 9,
+       "viewH": 100,
+       "mode": "tile",
+       "browseGeneration": 1
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "frames": [],
+     "link": "L1"
+    },
+    {
+     "op": "expect",
+     "frames": [
+      {
+       "v": 1,
+       "type": "UI_SYNC",
+       "sessionId": "@session",
+       "from": "leader",
+       "payload": {
+        "view": "browse",
+        "path": null,
+        "top": 9,
+        "viewH": 100,
+        "mode": "tile",
+        "browseGeneration": 1
+       }
+      }
+     ],
+     "link": "L2"
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "bo1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 6,
+      "type": "SET_ACTIVITY",
+      "payload": {
+       "state": "selecting"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "ACK",
+       "requestId": "bo1",
+       "request": "SET_ACTIVITY",
+       "sessionId": "@session",
+       "data": {}
+      },
+      {
+       "v": 1,
+       "type": "STATE",
+       "sessionId": "@session",
+       "revision": 7,
+       "workEpoch": 1,
+       "manifestVersion": 1,
+       "phase": "selecting",
+       "spreadId": "c0:s0",
+       "offset": 0,
+       "leaderSide": "left",
+       "dataPlane": "server-ws",
+       "browse": true,
+       "presence": {
+        "@L1.member": {
+         "role": "leader",
+         "status": "active",
+         "name": "Alice",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        },
+        "@L2.member": {
+         "role": "follower",
+         "status": "active",
+         "name": "Bob",
+         "ready": true,
+         "trust": "member",
+         "features": [
+          "member-drive-v1"
+         ]
+        }
+       },
+       "features": [
+        "member-drive-v1"
+       ],
+       "browseGeneration": 2,
+       "browseOpener": "@L2.member",
+       "browseOpenerRole": "follower"
+      }
+     ]
+    },
+    {
+     "op": "drain",
+     "link": "L1"
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "uo1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 7,
+      "type": "UI_SYNC",
+      "payload": {
+       "view": "browse",
+       "path": null,
+       "top": 42,
+       "viewH": 100,
+       "mode": "tile"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": []
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": []
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "ug1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 7,
+      "type": "UI_SYNC",
+      "payload": {
+       "view": "browse",
+       "path": null,
+       "top": 77,
+       "viewH": 100,
+       "mode": "tile",
+       "browseGeneration": 2
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": []
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "UI_SYNC",
+       "sessionId": "@session",
+       "from": "leader",
+       "payload": {
+        "view": "browse",
+        "path": null,
+        "top": 77,
+        "viewH": 100,
+        "mode": "tile",
+        "browseGeneration": 2
+       }
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "ug9",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 7,
+      "type": "UI_SYNC",
+      "payload": {
+       "view": "browse",
+       "path": null,
+       "top": 10,
+       "viewH": 100,
+       "mode": "tile",
+       "browseGeneration": 99
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": []
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": []
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "um1",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 7,
+      "type": "UI_SYNC",
+      "payload": {
+       "view": "browse",
+       "path": null,
+       "top": 10,
+       "viewH": 100,
+       "mode": "tile",
+       "browseGeneration": "abc"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "um1",
+       "request": "UI_SYNC",
+       "reason": "malformed",
+       "sessionId": null
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": []
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "um2",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 7,
+      "type": "UI_SYNC",
+      "payload": {
+       "view": "browse",
+       "path": null,
+       "top": 10,
+       "viewH": 100,
+       "mode": "tile",
+       "browseGeneration": null
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "um2",
+       "request": "UI_SYNC",
+       "reason": "malformed",
+       "sessionId": null
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": []
+    }
+   ]
+  },
+  {
+   "id": "ui_sync_pre_commit_picking_mirror_relays",
+   "title": "UI_SYNC before the first work commit: the picking mirror relays in both directions even though no shared browse is open",
+   "setup": "pairing",
+   "features": {
+    "L1": [
+     "member-drive-v1"
+    ],
+    "L2": [
+     "member-drive-v1"
+    ]
+   },
+   "steps": [
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "pc1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 2,
+      "type": "UI_SYNC",
+      "payload": {
+       "view": "browse",
+       "path": null,
+       "top": 30,
+       "viewH": 100,
+       "mode": "tile"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": []
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "UI_SYNC",
+       "sessionId": "@session",
+       "from": "leader",
+       "payload": {
+        "view": "browse",
+        "path": null,
+        "top": 30,
+        "viewH": 100,
+        "mode": "tile"
+       }
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "pc2",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 2,
+      "type": "UI_SYNC",
+      "payload": {
+       "view": "browse",
+       "path": null,
+       "top": 55,
+       "viewH": 100,
+       "mode": "tile"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": []
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "UI_SYNC",
+       "sessionId": "@session",
+       "from": "follower",
+       "payload": {
+        "view": "browse",
+        "path": null,
+        "top": 55,
+        "viewH": 100,
+        "mode": "tile"
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
 }

@@ -242,6 +242,13 @@ def test_ui_sync_relay_over_ws(server):
         sid, *_ = _full_pair(ws_a, ws_b)
         payload = {"view": "browse", "path": "group", "top": 42,
                    "viewH": 700, "scrollH": 3600, "mode": "tile"}
+        # Pre-commit picking mirror relays for members (no forbidden).
+        ws_a.send(_request("UI_SYNC", payload, session_id=sid, request_id="u0"))
+        pre = _expect(ws_b, "UI_SYNC")
+        assert pre["payload"] == payload
+        ws_a.send(_request("SET_ACTIVITY", {"state": "selecting"},
+                           session_id=sid, request_id="bo"))
+        assert _expect(ws_a, "ACK")["request"] == "SET_ACTIVITY"
         ws_a.send(_request("UI_SYNC", payload, session_id=sid, request_id="u"))
         ui = _expect(ws_b, "UI_SYNC")
         assert ui["from"] == "leader" and ui["payload"] == payload

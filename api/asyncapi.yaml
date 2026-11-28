@@ -89,6 +89,10 @@ components:
           v: {type: integer, const: 1}
           type: {type: string, const: HELLO}
           link: {type: string, description: link id}
+          features:
+            type: array
+            items: {type: string}
+            description: server-supported feature tokens（現行 member-drive-v1）
     Ack:
       payload:
         type: object
@@ -103,8 +107,10 @@ components:
             type: object
             description: |
               リクエスト種別ごとの結果。CREATE は
-              `{sessionId, code, memberId, role, resumeToken, expiresInSec,
-              guestToken?}` — `guestToken` は owner email が解決できる
+              `{sessionId, code, memberId, role, trust, resumeToken,
+              expiresInSec, features, guestToken?}` — `trust` は admission
+              時に固定される member|guest、`features` は server-supported
+              feature tokens。`guestToken` は owner email が解決できる
               ときのみ発行されるゲストアクセストークン
               （QR の `/#/join/<code>?gt=<token>` リンク /
               `JOIN{guestToken}` / `bookq_guest` cookie の bearer。
@@ -119,6 +125,16 @@ components:
           requestId: {type: string}
           reason: {type: string}
           sessionId: {type: [string, "null"]}
+          snapshot:
+            type: object
+            description: |
+              sequenced op の rejection に付く最新 committed snapshot（optional）。
+              STATE から `v`/`type` を除いた complete な観測状態で、
+              `presence`（role/status/trust/features/name/ready）と server `features`、
+              現行 encoding の browse additive metadata を含む。member-drive 対応
+              client は presence/features の欠けた snapshot を前回 STATE と合成せず
+              fail-closed に capability intersection を落とす。lifecycle/control
+              rejection では省略され得る。
     Applied:
       title: リクエストが逐次適用された通知
       payload:
@@ -233,16 +249,27 @@ components:
           type: {type: string, const: ERROR}
           code:
             type: string
-            enum: [ERR_VERSION, ERR_MALFORMED, ERR_TYPE, ERR_RANGE, ERR_SIZE]
+            enum: [not_found, empty_work, broken_archive, page_not_found, no_initial_page, range, size, malformed, timeout, forbidden]
+            description: |
+              session-scoped な load 失敗の理由語彙（manifest error 由来）。
+              ERROR は requestId を持たない uncorrelated な session event であり、
+              frame-level の validation 失敗（ERR_*）は REJECT または close で返り、
+              ERROR frame には乗らない。
           message: {type: string}
 
   schemas:
+    FeatureList:
+      type: [array, "null"]
+      maxItems: 32
+      items: {type: string, minLength: 1, maxLength: 64}
+      description: client/server capability feature tokens。未知 token は無視してよい。null は未広告（空配列と同じ）として扱う
+
     RequestFrame:
       type: object
       required: [v, requestId, sessionId, workEpoch, baseRevision, type, payload]
       properties:
         v: {type: integer, const: 1}
-        requestId: {type: string, minLength: 1}
+        requestId: {type: string, minLength: 1, maxLength: 128, pattern: '^[\x21-\x7e]+$', description: opaque idempotency key。server は 128 bytes (UTF-8) で enforced するため ASCII printable に限定する — maxLength(codepoints) だけでは byte cap を表現できない}
         sessionId: {type: [string, "null"]}
         workEpoch: {type: integer, minimum: 0}
         baseRevision: {type: integer, minimum: 0}
@@ -276,7 +303,10 @@ components:
         - type: object
           properties:
             type: {const: CREATE}
-            payload: {type: object}
+            payload:
+              type: object
+              properties:
+                features: {$ref: "#/components/schemas/FeatureList"}
         - type: object
           properties:
             type: {const: JOIN}
@@ -293,6 +323,7 @@ components:
               properties:
                 code: {type: string, pattern: '^\d{6}$'}
                 guestToken: {type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$'}
+                features: {$ref: "#/components/schemas/FeatureList"}
               oneOf:
                 - required: [code]
                 - required: [guestToken]
@@ -303,6 +334,7 @@ components:
               type: object
               properties:
                 pick: {type: string, minLength: 1, maxLength: 64}
+                features: {$ref: "#/components/schemas/FeatureList"}
         - type: object
           properties:
             type: {const: TURN}
@@ -346,6 +378,9 @@ components:
               properties:
                 folder: {type: string}
                 page: {$ref: "#/components/schemas/PageRef"}
+                auto:
+                  type: boolean
+                  description: pairing bootstrap の自動 load。committed/in-flight の非 auto load を上書きしない
         - type: object
           properties:
             type: {const: SIGNAL}
@@ -367,6 +402,35 @@ components:
             type: {const: UI_SYNC}
             payload: {$ref: "#/components/schemas/UiSyncPayload"}
         - type: object
+          properties:
+            type: {const: RESUME}
+            payload:
+              type: object
+              required: [memberId, resumeToken]
+              properties:
+                memberId: {type: string}
+                resumeToken: {type: string}
+                features: {$ref: "#/components/schemas/FeatureList"}
+        - type: object
+          properties:
+            type: {const: SET_ACTIVITY}
+            payload:
+              type: object
+              required: [state]
+              properties:
+                state: {type: string, enum: [active, suspended, selecting]}
+                endBrowse:
+                  type: boolean
+                  description: 明示 close gesture のみ true。member-drive capability intersection 下で shared browse を閉じる
+        - type: object
+          # RESUME/SET_ACTIVITY keep their historical enum entries here for
+          # wire-compatibility diffing, but the `not` below makes this
+          # fallback disjoint from their precise payload variants so the
+          # outer oneOf still means exactly-one.
+          not:
+            properties:
+              type:
+                enum: [RESUME, SET_ACTIVITY]
           properties:
             type:
               enum:
@@ -398,6 +462,24 @@ components:
         scrollH: {type: number, exclusiveMinimum: 0, maximum: 100000000}
         pred: {type: number, minimum: 0, maximum: 100000000, description: sender の fling 終端予測 px（optional — 未送信なら受信側は実測追従）}
         mode: {type: string, enum: [tile, list, card]}
+        browseGeneration:
+          type: integer
+          minimum: 1
+          description: >
+            送信者が観測した browse generation（member-drive のみ・additive）。
+            generation は真の遷移（closed→open と open→closed の双方）で進む
+            session-scoped epoch — close も因果境界。server 側 generation が
+            進んだ後に到着した旧 generation
+            の frame は server が relay せず drop し、relay を抜けたものも受信側が
+            現行 generation と不一致なら drop する — 世代境界を跨いだ in-flight
+            frame が新 generation の初期状態（opener の first seed / unlock 判定）
+            を汚染するのを防ぐ。タグなし frame は member-drive intersection 成立
+            かつ generation > 0 の間は（browse open の有無に関わらず）
+            pre-upgrade straggler として drop され、それ以外
+            （legacy/mixed pair・generation 0 の casual picking）では relay される。member の
+            UI_SYNC は pair 成立中は browse open・commit 状態に関わらず常に
+            relay される（tile browsing は常に共有）— generation 検査は
+            relay 許可ではなく因果保護のみ。
 
     StateFrame:
       type: object
@@ -415,6 +497,27 @@ components:
         spreadId: {type: [string, "null"]}
         offset: {type: integer, enum: [0, 1]}
         leaderSide: {type: string, enum: [right, left]}
+        browse:
+          type: boolean
+          description: |
+            shared browse の session スコープ状態。member-drive intersection 成立中の
+            open では true を送る。一度 generation が存在した後の closed state では
+            intersection の有無に関係なく additive な false を送り、offline 中に起きた
+            close や capability downgrade close を resume 後も観測できるようにする。
+            generation 0 の間は省略する。paused が selecting を mask するため phase だけでは判別できない。
+        browseOpener:
+          type: string
+          description: "shared browse open 時のみ付く additive metadata: server serialization で最初に open を受理した member id"
+        browseOpenerRole:
+          type: string
+          enum: [leader, follower]
+          description: "browseOpener の現在 role。同時 open の deterministic tie-break 用 additive metadata"
+        browseGeneration:
+          type: integer
+          minimum: 0
+          description: "session-scoped な additive generation。真の遷移（closed→open と open→closed の双方）ごとに increment し、さらに OPEN_WORK commit は browse open の有無に関わらず常に 1 進める — close/commit も因果境界。open では browse:true と共に、generation 成立後の closed では browse:false と共に送る。generation 0 の間は browse metadata を載せない。RESUME/reconnect を跨いでも session 終了まで保持する"
         presence:
           type: object
-          description: "link id → {role: leader|follower, ...}"
+          description: "member id → {role, status, trust: member|guest, features: string[], name, ready}"
+        features:
+          $ref: "#/components/schemas/FeatureList"

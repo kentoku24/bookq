@@ -69,6 +69,23 @@ pub const REASON_FORBIDDEN: &str = "forbidden";
 /// Generic server-side failure (e.g. entropy source unavailable) — the op
 /// is rejected rather than run with degraded security properties.
 pub const REASON_INTERNAL: &str = "internal_error";
+/// A resume token was presented on a link whose authentication class no
+/// longer matches the trust class fixed when the member was admitted
+/// (guest bearer vs member session/bearer). This is terminal for that
+/// credential on that link: retrying the same RESUME cannot succeed.
+pub const REASON_TRUST_MISMATCH: &str = "trust_mismatch";
+/// `payload.origin` appeared on a frame outside the sequenced data-plane
+/// relay whitelist, or did not resolve to a session member role.
+pub const REASON_BAD_ORIGIN: &str = "bad_origin";
+
+// ── member trust / capabilities ────────────────────────────────────────────
+
+pub const TRUST_MEMBER: &str = "member";
+pub const TRUST_GUEST: &str = "guest";
+/// Phase-1 member-drive capability. The exact string is wire-visible; it is
+/// deliberately versioned independently of the transport PROTOCOL_VERSION
+/// (which remains v1 because unknown fields are additive).
+pub const CAP_MEMBER_DRIVE: &str = "member-drive-v1";
 
 // ── END reasons ────────────────────────────────────────────────────────────
 
@@ -84,11 +101,22 @@ pub const END_SHUTDOWN: &str = "shutdown";
 /// The session's leader was disabled/removed — their guest grants and the
 /// pair session itself die together.
 pub const END_OWNER_DISABLED: &str = "owner_disabled";
+/// The load-op tombstone budget ran out — almost always a flood or a
+/// client stuck in a retry loop. The session dies rather than choosing
+/// between unbounded memory and silently forgetting replay protection.
+pub const END_DEDUP_EXHAUSTED: &str = "dedup_exhausted";
 
 // dedup retention: full outcomes for the last DEDUP_WINDOW keys, evicted
-// keys remembered as tombstones for the workEpoch's whole lifetime.
+// keys remembered as tombstones. Ordinary tombstones are FIFO-capped;
+// load-op tombstones are budgeted separately — OPEN_WORK is the one op
+// that skips the epoch gate, so losing one would make a replay executable
+// again. The load budget is a hard cap, not a FIFO: hitting it condemns
+// the session (see dedup_tombstone), because silently aging entries out
+// would trade correctness for memory and honest sessions never come
+// close — a work pick is a human-scale action.
 pub const DEDUP_WINDOW: usize = 256;
 pub const DEDUP_TOMBSTONE_MAX: usize = 8192;
+pub const DEDUP_LOAD_TOMBSTONE_MAX: usize = 1024;
 
 /// Failed-JOIN throttle per link: past `JOIN_FAIL_MAX` rejects inside the
 /// window the transport is closed (6-digit codes are brute-forceable —
@@ -99,6 +127,24 @@ pub const JOIN_FAIL_WINDOW_SEC: f64 = 60.0;
 /// UI_SYNC rate cap per member — excess frames drop silently so a buggy
 /// sender can't fill the peer's bounded outq.
 pub const UI_SYNC_WINDOW_SEC: f64 = 1.0;
+
+/// Close the shared browse as a causal epoch transition. The generation is
+/// session-scoped and monotonic: it advances on EVERY true open→closed
+/// transition exactly as it does on closed→open, so mirror traffic causally
+/// produced before the boundary — a commit, an explicit endBrowse, a legacy
+/// leader close, or a capability downgrade — can be told apart from traffic
+/// produced after it. Without this, a pre-commit-generation frame honestly
+/// tagged with the still-current generation could cross an OPEN_WORK commit
+/// and reopen shared picking after the pair already chose a work.
+/// Idempotent closes (already closed) do not advance the epoch.
+fn close_browse_epoch(s: &mut PairSession) {
+    if s.browse_open {
+        s.browse_generation += 1;
+    }
+    s.browse_open = false;
+    s.browse_opener_id = None;
+}
+
 pub const UI_SYNC_RATE_MAX: u32 = 50;
 
 // ── opaque ids / tokens / codes ──────────────────────────────────────────
@@ -423,6 +469,14 @@ pub struct Member {
     pub session_id: Option<String>,
     pub link_id: Option<String>,
     pub status: String, // active | suspended | offline | pending
+    /// Trust class fixed at admission. Unlike `role` this never changes for
+    /// the lifetime of the member credential; RESUME re-checks the link's
+    /// authentication class against it instead of re-deriving it.
+    pub trust: String, // member | guest
+    /// Feature tokens advertised by the client runtime that most recently
+    /// admitted/resumed this member. Capabilities are runtime state (not
+    /// part of trust) and may change across RESUME.
+    pub capabilities: Vec<String>,
     pub offline_since: Option<Instant>,
     pub dc_state: String, // up | down
     pub last_applied: Option<Value>,
@@ -433,7 +487,15 @@ pub struct Member {
 impl Member {
     /// `None` when the entropy source is gone — the resume_token is bearer
     /// material and must never come out degraded.
-    fn new(role: &str, name: String, session_id: &str, link_id: &str, status: &str) -> Option<Self> {
+    fn new(
+        role: &str,
+        name: String,
+        session_id: &str,
+        link_id: &str,
+        status: &str,
+        trust: &str,
+        capabilities: Vec<String>,
+    ) -> Option<Self> {
         Some(Self {
             id: new_id(),
             role: role.to_string(),
@@ -442,6 +504,8 @@ impl Member {
             session_id: Some(session_id.to_string()),
             link_id: Some(link_id.to_string()),
             status: status.to_string(),
+            trust: trust.to_string(),
+            capabilities,
             offline_since: None,
             dc_state: "down".into(),
             last_applied: None,
@@ -466,6 +530,13 @@ pub struct LoadJob {
     pub request_id: String,
     #[allow(dead_code)]
     pub role: String,
+    /// Bootstrap-generated load. An automatic load is best-effort only and
+    /// must never displace a deliberate (non-auto) pick.
+    pub auto: bool,
+    /// The ACK captured when this load was accepted. The dedup window may
+    /// evict its copy while the asynchronous resolver is still running, but
+    /// the epoch commit must remain able to carry the trigger outcome.
+    pub ack_frame: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -496,9 +567,29 @@ pub struct PairSession {
     dedup_order: VecDeque<String>,
     pub dedup_seen: HashSet<String>,
     dedup_seen_order: VecDeque<String>,
+    /// Tombstones for OPEN_WORK outcomes, hard-capped at
+    /// DEDUP_LOAD_TOMBSTONE_MAX. OPEN_WORK is the one op that skips the
+    /// epoch gate, so a forgotten load tombstone turns a replay into
+    /// executable state again — entries never age out while the session
+    /// lives. Overflow condemns the session instead.
+    pub dedup_load_seen: HashSet<String>,
+    /// Set when the load-op tombstone budget is exceeded. The session is
+    /// torn down after the current dispatch/completion unwinds — never
+    /// mid-mutation — so replay protection is never silently dropped and
+    /// memory stays bounded.
+    pub condemned: bool,
     pub load_seq: i64,
     pub pending_load: Option<LoadJob>,
-    pub selecting: bool,
+    /// Whether the currently committed work load came from bootstrap. Once a
+    /// deliberate (non-auto) load has committed, later automatic bootstrap
+    /// loads are stale by definition and must be rejected.
+    pub committed_load_auto: Option<bool>,
+    pub browse_open: bool,
+    /// First opener of the current shared-browse generation. Simultaneous
+    /// opens are serialized by the server; only a closed-to-open transition may
+    /// set this, so duplicate opens never overwrite the winner.
+    pub browse_opener_id: Option<String>,
+    pub browse_generation: i64,
     pub apply_seq: i64,
     pub apply_log: Vec<Value>,
 }
@@ -533,9 +624,14 @@ impl PairSession {
             dedup_order: VecDeque::new(),
             dedup_seen: HashSet::new(),
             dedup_seen_order: VecDeque::new(),
+            dedup_load_seen: HashSet::new(),
+            condemned: false,
             load_seq: 0,
             pending_load: None,
-            selecting: false,
+            committed_load_auto: None,
+            browse_open: false,
+            browse_opener_id: None,
+            browse_generation: 0,
             apply_seq: 0,
             apply_log: Vec::new(),
         })
@@ -589,7 +685,21 @@ pub struct Inner {
     bulk_max: usize,
     no_response_timeout: Duration,
     resume_window: Duration,
+    /// Operator kill switch for Phase-1 member-drive semantics. Capability
+    /// intersection is still reflected, but the server never treats it as
+    /// enabled when this is false.
+    member_drive_enabled: bool,
     wake: Arc<Notify>,
+}
+
+fn member_drive_enabled_from_env() -> bool {
+    !matches!(
+        std::env::var("BOOKQ_PAIR_MEMBER_DRIVE")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "off" | "no"
+    )
 }
 
 impl Registry {
@@ -610,6 +720,7 @@ impl Registry {
                 bulk_max: SEND_BULK_MAX_BYTES,
                 no_response_timeout: Duration::from_secs_f64(NO_RESPONSE_TIMEOUT),
                 resume_window: Duration::from_secs_f64(RESUME_WINDOW_SECONDS),
+                member_drive_enabled: member_drive_enabled_from_env(),
                 wake: wake.clone(),
             }),
             wake,
@@ -821,7 +932,63 @@ impl Registry {
 
 // ── Inner: all dispatch is synchronous under the registry lock ─────────────
 
+/// Capability advertisement parser for admission/resume payloads. Validation
+/// has already bounded the shape; unknown feature tokens are deliberately
+/// preserved so a newer peer can be reflected verbatim.
+fn payload_features(payload: &Value) -> Vec<String> {
+    let mut out: Vec<String> = payload
+        .get("features")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn link_trust(link: &Link) -> &'static str {
+    if link.is_guest() {
+        TRUST_GUEST
+    } else {
+        TRUST_MEMBER
+    }
+}
+
 impl Inner {
+    fn server_features(&self) -> Vec<String> {
+        if self.member_drive_enabled {
+            vec![CAP_MEMBER_DRIVE.to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn server_features_json(&self) -> Value {
+        Value::Array(
+            self.server_features()
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+        )
+    }
+
+    /// Phase-1 member-drive semantics apply only when the deployment allows
+    /// them AND both admitted members currently advertise the capability.
+    /// Pending/offline members keep their last advertised runtime capability:
+    /// a temporary disconnect must not silently downgrade pair semantics.
+    fn member_drive_intersection(&self, s: &PairSession) -> bool {
+        self.member_drive_enabled
+            && s.members.len() == 2
+            && s.members
+                .iter()
+                .all(|m| m.capabilities.iter().any(|f| f == CAP_MEMBER_DRIVE))
+    }
+
     fn session_mut(&mut self, sid: &str) -> Option<&mut PairSession> {
         self.sessions.iter_mut().find(|s| s.id == sid)
     }
@@ -875,6 +1042,7 @@ impl Inner {
             ("v", Value::from(protocol::PROTOCOL_VERSION)),
             ("type", Value::String("HELLO".into())),
             ("link", Value::String(id.clone())),
+            ("features", self.server_features_json()),
         ]);
         self.send_obj(&id, &hello);
         self.wake.notify_one();
@@ -1145,6 +1313,18 @@ impl Inner {
             return;
         }
 
+        // Relay type whitelist: `payload.origin` is meaningful only on the
+        // sequenced data-plane ops handled by `sequenced_op`. A relayed
+        // control frame must never inherit leader authority — reject it at
+        // the boundary rather than silently treating it as a direct frame.
+        let has_origin = req["payload"]
+            .get("origin")
+            .is_some_and(|v| !v.is_null());
+        if has_origin && !state::SEQUENCED_TYPES.contains(&t.as_str()) {
+            self.reject(link_id, req_id(req), Some(&t), REASON_BAD_ORIGIN, Some(&sid));
+            return;
+        }
+
         match t.as_str() {
             "LEAVE" => self.end_session(&sid, END_LEFT),
             "APPROVE" | "REJECT" => {
@@ -1162,6 +1342,13 @@ impl Inner {
                 }
             }
             _ => self.reject(link_id, req_id(req), Some(&t), REASON_MALFORMED, None),
+        }
+        // A condemned session is torn down only after the dispatch unwinds —
+        // killing it mid-mutation would strand half-applied state. Whatever
+        // this frame validly produced (ACK/REJECT) has already gone out;
+        // the END frame is the final word.
+        if self.session(&sid).is_some_and(|s| s.condemned) {
+            self.end_session(&sid, END_DEDUP_EXHAUSTED);
         }
     }
 
@@ -1270,12 +1457,27 @@ impl Inner {
             .and_then(|l| l.user_str("email"))
             .map(|e| e.trim().to_lowercase())
             .filter(|e| !e.is_empty());
-        let Some(member) = Member::new("leader", name, &sid, link_id, "active") else {
+        let trust = self
+            .links
+            .get(link_id)
+            .map(link_trust)
+            .unwrap_or(TRUST_MEMBER);
+        let capabilities = payload_features(&req["payload"]);
+        let Some(member) = Member::new(
+            "leader",
+            name,
+            &sid,
+            link_id,
+            "active",
+            trust,
+            capabilities,
+        ) else {
             self.reject(link_id, req_id(req), Some("CREATE"), REASON_INTERNAL, None);
             return;
         };
         let mid = member.id.clone();
         let resume_token = member.resume_token.clone();
+        let member_trust = member.trust.clone();
         session.members.push(member);
         // Guest-access grant for the QR link — bound to this session so
         // `end_session` revokes it no matter which teardown path fires.
@@ -1305,8 +1507,10 @@ impl Inner {
             ("code", Value::String(code)),
             ("memberId", Value::String(mid.clone())),
             ("role", Value::String("leader".into())),
+            ("trust", Value::String(member_trust)),
             ("resumeToken", Value::String(resume_token)),
             ("expiresInSec", Value::from(reg.code_ttl.as_secs() as i64)),
+            ("features", self.server_features_json()),
         ];
         if let Some(gt) = guest_token {
             data.push(("guestToken", Value::String(gt)));
@@ -1416,7 +1620,21 @@ impl Inner {
             .and_then(|l| l.user_str("name"))
             .unwrap_or("")
             .to_string();
-        let Some(member) = Member::new("follower", name, sid, link_id, "pending") else {
+        let trust = self
+            .links
+            .get(link_id)
+            .map(link_trust)
+            .unwrap_or(TRUST_MEMBER);
+        let capabilities = payload_features(&req["payload"]);
+        let Some(member) = Member::new(
+            "follower",
+            name,
+            sid,
+            link_id,
+            "pending",
+            trust,
+            capabilities,
+        ) else {
             self.reject(
                 link_id,
                 req_id(req),
@@ -1428,6 +1646,7 @@ impl Inner {
         };
         let mid = member.id.clone();
         let resume_token = member.resume_token.clone();
+        let member_trust = member.trust.clone();
         let Some(s) = self.session_mut(sid) else {
             return;
         };
@@ -1442,21 +1661,19 @@ impl Inner {
         let leader = self
             .session(sid)
             .and_then(|s| s.leader().map(|m| (m.name.clone(), m.link_id.clone())));
-        self.ack(
-            link_id,
-            req,
-            Some(protocol::frame(&[
-                ("sessionId", Value::String(sid.into())),
-                ("memberId", Value::String(mid.clone())),
-                ("role", Value::String("follower".into())),
-                ("resumeToken", Value::String(resume_token)),
-                (
-                    "leaderName",
-                    Value::String(leader.clone().map(|x| x.0).unwrap_or_default()),
-                ),
-            ])),
-            Some(sid),
-        );
+        let join_data = protocol::frame(&[
+            ("sessionId", Value::String(sid.into())),
+            ("memberId", Value::String(mid.clone())),
+            ("role", Value::String("follower".into())),
+            ("trust", Value::String(member_trust)),
+            ("resumeToken", Value::String(resume_token)),
+            (
+                "leaderName",
+                Value::String(leader.clone().map(|x| x.0).unwrap_or_default()),
+            ),
+            ("features", self.server_features_json()),
+        ]);
+        self.ack(link_id, req, Some(join_data), Some(sid));
         if let Some((_, Some(lid))) = leader {
             let frame = protocol::frame(&[
                 ("v", Value::from(protocol::PROTOCOL_VERSION)),
@@ -1613,10 +1830,17 @@ impl Inner {
         let member_exists = self
             .session(&sid)
             .and_then(|s| s.members.iter().find(|m| Some(&m.id) == member_id.as_ref()))
-            .map(|m| (m.resume_token.clone(), m.link_id.clone(), m.offline_since));
+            .map(|m| {
+                (
+                    m.resume_token.clone(),
+                    m.link_id.clone(),
+                    m.offline_since,
+                    m.trust.clone(),
+                )
+            });
         let bad = match &member_exists {
             None => true,
-            Some((tok, _, _)) => !matches!(token, Some(t) if t == tok),
+            Some((tok, _, _, _)) => !matches!(token, Some(t) if t == tok),
         };
         if bad {
             self.reject(
@@ -1628,7 +1852,27 @@ impl Inner {
             );
             return;
         }
-        let (_, mlink, offline_since) = member_exists.unwrap();
+        let (_, mlink, offline_since, stored_trust) = member_exists.unwrap();
+        // Trust is fixed at admission and is not re-negotiated. The link's
+        // current authentication class must match it exactly: a member
+        // session/bearer resumes member trust; a valid `bookq_guest` bearer
+        // resumes guest trust. A mismatch is terminal for this credential on
+        // this link (the same RESUME can never become valid by retrying).
+        let current_trust = self
+            .links
+            .get(link_id)
+            .map(link_trust)
+            .unwrap_or(TRUST_MEMBER);
+        if current_trust != stored_trust {
+            self.reject(
+                link_id,
+                req_id(req),
+                Some("RESUME"),
+                REASON_TRUST_MISMATCH,
+                Some(&sid),
+            );
+            return;
+        }
         if mlink
             .as_ref()
             .is_some_and(|lid| self.links.get(lid).is_some_and(|l| l.alive))
@@ -1655,29 +1899,53 @@ impl Inner {
             }
         }
         let mid = member_id.unwrap();
-        let (role, tok) = {
+        let capabilities = payload_features(payload);
+        let intersected_before = self
+            .session(&sid)
+            .is_some_and(|s| self.member_drive_intersection(s));
+        let (role, tok, trust) = {
             let Some(m) = self.member_mut(&sid, &mid) else {
                 return;
             };
             m.link_id = Some(link_id.to_string());
             m.status = "active".into();
             m.offline_since = None;
-            (m.role.clone(), m.resume_token.clone())
+            // Trust itself is immutable; capabilities describe the current
+            // runtime and are refreshed by every successful RESUME.
+            m.capabilities = capabilities;
+            (m.role.clone(), m.resume_token.clone(), m.trust.clone())
         };
+        // Capabilities are current runtime facts. If this RESUME downgrades
+        // the pair out of member-drive while a shared browse is open, the
+        // server must close that browse explicitly: in legacy semantics a
+        // follower close is a no-op, so otherwise neither side may have an
+        // effective close path and the pre-commit selecting phase wedges.
+        let intersected_after = self
+            .session(&sid)
+            .is_some_and(|s| self.member_drive_intersection(s));
+        if intersected_before && !intersected_after {
+            if let Some(s) = self.session_mut(&sid) {
+                if s.browse_open {
+                    close_browse_epoch(s);
+                    tracing::info!(
+                        "reader-sync session={} shared browse closed on capability downgrade",
+                        sid
+                    );
+                }
+            }
+        }
         if let Some(l) = self.links.get_mut(link_id) {
             l.member_id = Some(mid.clone());
         }
-        self.ack(
-            link_id,
-            req,
-            Some(protocol::frame(&[
-                ("sessionId", Value::String(sid.clone())),
-                ("memberId", Value::String(mid.clone())),
-                ("role", Value::String(role)),
-                ("resumeToken", Value::String(tok)),
-            ])),
-            Some(&sid),
-        );
+        let resume_data = protocol::frame(&[
+            ("sessionId", Value::String(sid.clone())),
+            ("memberId", Value::String(mid.clone())),
+            ("role", Value::String(role)),
+            ("trust", Value::String(trust)),
+            ("resumeToken", Value::String(tok)),
+            ("features", self.server_features_json()),
+        ]);
+        self.ack(link_id, req, Some(resume_data), Some(&sid));
         self.broadcast_state(&sid);
         // §3.3: the manifest is re-delivered on resume.
         if self.session(&sid).is_some_and(|s| s.manifest.is_some()) {
@@ -1710,13 +1978,33 @@ impl Inner {
             return;
         }
         let st = st.unwrap();
+        let end_browse = req["payload"]
+            .get("endBrowse")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let (role, trust) = self
+            .session(sid)
+            .and_then(|s| s.members.iter().find(|m| m.id == mid))
+            .map(|m| (m.role.clone(), m.trust.clone()))
+            .unwrap_or_else(|| (String::new(), TRUST_MEMBER.to_string()));
+        let member_drive = self
+            .session(sid)
+            .is_some_and(|s| self.member_drive_intersection(s));
         if st == "selecting" {
-            // Session phase control — only the leader's browse flag drives it.
-            let role = self
-                .session(sid)
-                .and_then(|s| s.members.iter().find(|m| m.id == mid))
-                .map(|m| m.role.clone());
-            if role.as_deref() != Some("leader") {
+            // Shared browse open. In legacy pairs only the leader may drive;
+            // once both members advertise member-drive-v1 either member may
+            // open. Guests are never browse drivers in either mode.
+            if trust == TRUST_GUEST {
+                self.reject(
+                    link_id,
+                    req_id(req),
+                    Some("SET_ACTIVITY"),
+                    REASON_FORBIDDEN,
+                    Some(sid),
+                );
+                return;
+            }
+            if !member_drive && role != "leader" {
                 self.reject(
                     link_id,
                     req_id(req),
@@ -1727,9 +2015,28 @@ impl Inner {
                 return;
             }
             if let Some(s) = self.session_mut(sid) {
-                s.selecting = true;
+                // Simultaneous opens are ordered by server serialization. The
+                // first closed→open transition owns the generation; duplicate
+                // opens remain idempotent and must not overwrite the winner.
+                if !s.browse_open {
+                    s.browse_generation += 1;
+                    s.browse_opener_id = Some(mid.to_string());
+                }
+                s.browse_open = true;
             }
         } else {
+            // Validate the close authority before mutating activity: a
+            // rejected explicit close must not become a plain liveness ping.
+            if end_browse && trust == TRUST_GUEST {
+                self.reject(
+                    link_id,
+                    req_id(req),
+                    Some("SET_ACTIVITY"),
+                    REASON_FORBIDDEN,
+                    Some(sid),
+                );
+                return;
+            }
             let is_leader = if let Some(m) = self.member_mut(sid, mid) {
                 if m.status != "offline" {
                     m.status = st.clone();
@@ -1738,9 +2045,21 @@ impl Inner {
             } else {
                 false
             };
-            if is_leader {
+            if member_drive {
+                // New semantics: active/suspended are liveness only. Only an
+                // explicit endBrowse signal closes the shared browse; either
+                // member may send it. Suspend/visibility restoration never do.
+                if end_browse {
+                    if let Some(s) = self.session_mut(sid) {
+                        close_browse_epoch(s);
+                    }
+                }
+            } else if is_leader {
+                // Legacy mixed-pair semantics are preserved exactly: the
+                // leader leaving the selecting activity clears the browse
+                // flag. (Capability-unaware clients depend on this close.)
                 if let Some(s) = self.session_mut(sid) {
-                    s.selecting = false;
+                    close_browse_epoch(s);
                 }
             }
         }
@@ -1811,6 +2130,70 @@ impl Inner {
                 Some(sid),
             );
             return;
+        }
+        // Tile browsing is always shared between members (product decision,
+        // restoring the legacy behavior): mirror traffic relays whenever the
+        // pair is established, whether or not a shared browse was explicitly
+        // opened — picking the first work and browsing after closing one are
+        // the same human activity. There is no closed-browse gate: the
+        // explicit-open flow only adds the generation-discriminated causal
+        // protection below, it is never a precondition for relaying.
+        //
+        // A guest's frames are the exception: guests only ever receive the
+        // mirror, they may not emit it — except while a shared browse is
+        // explicitly open, where participation was always allowed.
+        let sender_is_guest = self
+            .session(sid)
+            .and_then(|s| s.members.iter().find(|m| m.id == mid))
+            .is_some_and(|m| m.trust == TRUST_GUEST);
+        let browse_open = self.session(sid).is_some_and(|s| s.browse_open);
+        if sender_is_guest && !browse_open {
+            self.reject(
+                link_id,
+                req_id(req),
+                Some("UI_SYNC"),
+                REASON_FORBIDDEN,
+                Some(sid),
+            );
+            return;
+        }
+        // A UI_SYNC that carries a generation is causally bound to the
+        // browse generation the sender observed. A close→reopen increments
+        // the server-side generation, so a frame that was honest when sent
+        // but arrives after the boundary must not be relayed into the new
+        // generation — the receiver has no other way to tell it apart from
+        // the new opener's first seed. Ephemeral traffic is dropped, not
+        // rejected: a generation skew is a race outcome, not an error.
+        // Frames without the field relay only while the pair cannot tag:
+        // once the member-drive intersection is established every participant
+        // is running a build that tags, so an untagged frame can only be a
+        // pre-upgrade straggler — exactly the in-flight pollution the
+        // generation exists to prevent — and is dropped like a mismatch.
+        // Pre-commit picking mirrors have no generations at all and pass
+        // either way (the current generation is 0 there).
+        let intersection = self
+            .session(sid)
+            .is_some_and(|s| self.member_drive_intersection(s));
+        match req["payload"].get("browseGeneration").and_then(|v| v.as_i64()) {
+            Some(gen) => {
+                let current = self.session(sid).map(|s| s.browse_generation);
+                if current != Some(gen) {
+                    return;
+                }
+            }
+            None => {
+                // Once a generation exists in a member-drive pair, every
+                // honest current build tags — an untagged frame is either a
+                // pre-upgrade straggler or a pre-STATE boot artifact and is
+                // dropped regardless of the open boolean. Generation zero
+                // (never opened) is the casual picking mirror and passes.
+                let gen_positive = self
+                    .session(sid)
+                    .is_some_and(|s| s.browse_generation > 0);
+                if intersection && gen_positive {
+                    return;
+                }
+            }
         }
         let other_link = self.session(sid).and_then(|s| {
             s.members
@@ -1937,16 +2320,12 @@ impl Inner {
                 break; // the just-stored entry is never evicted in-place
             }
             s.dedup_order.pop_front();
+            let load_op = s
+                .dedup
+                .get(&oldest)
+                .is_some_and(dedup_frame_needs_cross_epoch_tombstone);
             s.dedup.remove(&oldest);
-            s.dedup_seen.insert(oldest.clone());
-            s.dedup_seen_order.push_back(oldest);
-            while s.dedup_seen.len() > DEDUP_TOMBSTONE_MAX {
-                if let Some(o) = s.dedup_seen_order.pop_front() {
-                    s.dedup_seen.remove(&o);
-                } else {
-                    break;
-                }
-            }
+            dedup_tombstone(s, oldest, load_op);
         }
     }
 
@@ -1960,7 +2339,16 @@ impl Inner {
         role: &str,
         reason: &'static str,
     ) {
-        let snap = state::snapshot(self.session(sid).unwrap(), &self.links);
+        let browse_visible = self
+            .session(sid)
+            .is_some_and(|s| self.member_drive_intersection(s));
+        let server_features = self.server_features_json();
+        let snap = state::snapshot(
+            self.session(sid).unwrap(),
+            &self.links,
+            browse_visible,
+            server_features,
+        );
         let resp = protocol::frame(&[
             ("v", Value::from(protocol::PROTOCOL_VERSION)),
             ("type", Value::String("REJECT".into())),
@@ -1994,13 +2382,14 @@ impl Inner {
         };
 
         // Effective role / member for relayed (payload.origin) requests.
-        let member_role = self
+        let (member_role, sender_trust) = self
             .session(sid)
             .and_then(|s| s.members.iter().find(|m| m.id == mid))
-            .map(|m| m.role.clone())
-            .unwrap_or_default();
+            .map(|m| (m.role.clone(), m.trust.clone()))
+            .unwrap_or_else(|| (String::new(), TRUST_MEMBER.to_string()));
         let mut role = member_role.clone();
         let mut eff_id = mid.to_string();
+        let mut eff_trust = sender_trust;
         // `origin is not None` — any non-null value is checked; a non-str
         // or non-role value is bad_origin even for a leader (py `in ROLES`).
         let origin = payload.get("origin").filter(|v| !v.is_null());
@@ -2012,11 +2401,17 @@ impl Inner {
             }
             role = o.unwrap().to_string();
             if role != member_role {
-                eff_id = self
-                    .session(sid)
-                    .and_then(|s| s.members.iter().find(|m| m.role == role))
-                    .map(|m| m.id.clone())
-                    .unwrap_or_else(|| mid.to_string());
+                if let Some((target_id, target_trust)) = self.session(sid).and_then(|s| {
+                    s.members
+                        .iter()
+                        .find(|m| m.role == role)
+                        .map(|m| (m.id.clone(), m.trust.clone()))
+                }) {
+                    eff_id = target_id;
+                    eff_trust = target_trust;
+                } else {
+                    eff_id = mid.to_string();
+                }
             }
         }
 
@@ -2041,7 +2436,7 @@ impl Inner {
         }
         if self
             .session(sid)
-            .is_some_and(|s| s.dedup_seen.contains(&dkey))
+            .is_some_and(|s| dedup_has_tombstone(s, &dkey))
         {
             self.reject_snapshot(&resp_link, req, sid, &role, state::REASON_STALE_REQUEST);
             return;
@@ -2056,7 +2451,7 @@ impl Inner {
                     state::check_base(self.session(sid).unwrap(), req)?;
                 }
             }
-            self.apply_op(reg, &resp_link, req, sid, mid, &eff_id, &role)
+            self.apply_op(reg, &resp_link, req, sid, mid, &eff_id, &role, &eff_trust)
         })();
         if let Err(r) = result {
             self.reject_snapshot(&resp_link, req, sid, &role, r.reason);
@@ -2073,15 +2468,50 @@ impl Inner {
         _mid: &str,
         eff_id: &str,
         role: &str,
+        eff_trust: &str,
     ) -> Result<(), state::Reject> {
         let t = req["type"].as_str().unwrap().to_string();
         let payload = req["payload"].as_object().cloned().unwrap_or_default();
         match t.as_str() {
             "OPEN_WORK" => {
-                if role != "leader" {
+                // Authorization is against the effective actor resolved from
+                // payload.origin — never against the relay transport. A guest
+                // is not a work-selection driver even when a member leader
+                // relays the frame.
+                if eff_trust == TRUST_GUEST {
+                    return Err(state::Reject {
+                        reason: REASON_FORBIDDEN,
+                    });
+                }
+                let member_drive = self
+                    .session(sid)
+                    .is_some_and(|s| self.member_drive_intersection(s));
+                if !member_drive && role != "leader" {
                     return Err(state::Reject {
                         reason: state::REASON_NOT_LEADER,
                     });
+                }
+                let auto = payload
+                    .get("auto")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if auto {
+                    let deliberate_in_flight = self
+                        .session(sid)
+                        .and_then(|s| s.pending_load.as_ref())
+                        .is_some_and(|job| !job.auto);
+                    let deliberate_committed = self
+                        .session(sid)
+                        .and_then(|s| s.committed_load_auto)
+                        == Some(false);
+                    if deliberate_in_flight || deliberate_committed {
+                        // Bootstrap is best-effort: once a deliberate pick is
+                        // committed or merely in flight, an automatic load is
+                        // stale by definition and must not overwrite it.
+                        return Err(state::Reject {
+                            reason: state::REASON_STALE_REQUEST,
+                        });
+                    }
                 }
                 let page = match payload.get("page") {
                     Some(p) if !p.is_null() => p.clone(),
@@ -2106,7 +2536,7 @@ impl Inner {
                     });
                 }
                 let folder = payload["folder"].as_str().unwrap_or("").to_string();
-                self.begin_load(reg, resp_link, req, sid, role, folder, page, offset);
+                self.begin_load(reg, resp_link, req, sid, role, folder, page, offset, auto);
                 Ok(())
             }
             "TURN" | "GOTO" => {
@@ -2149,7 +2579,7 @@ impl Inner {
                     .to_string();
                 let page = model::ref_json(&anchor);
                 // raw offset (may be bool — resolve_work rejects it like py)
-                self.begin_load(reg, resp_link, req, sid, role, folder, page, offset);
+                self.begin_load(reg, resp_link, req, sid, role, folder, page, offset, false);
                 Ok(())
             }
             "SWAP_SIDES" => {
@@ -2287,6 +2717,7 @@ impl Inner {
         folder: String,
         page: Value,
         offset: Value,
+        auto: bool,
     ) {
         let job = {
             let Some(s) = self.session_mut(sid) else {
@@ -2301,11 +2732,27 @@ impl Inner {
                 offset: offset.clone(),
                 request_id: req["requestId"].as_str().unwrap_or("").to_string(),
                 role: role.to_string(),
+                auto,
+                ack_frame: None,
             };
             s.pending_load = Some(job.clone());
             job
         };
         self.commit_op(resp_link, req, sid, role);
+        // The resolver may outlive the trigger ACK's occupancy in the fixed
+        // dedup window. Retain the exact accepted outcome on the pending job
+        // so the eventual epoch commit can carry it independent of eviction
+        // timing. This is not a second response path — it is the same frame
+        // commit_op just stored and sent.
+        let dkey = Self::dedup_key(req, role);
+        if let Some(s) = self.session_mut(sid) {
+            if s.pending_load.as_ref().is_some_and(|j| j.seq == job.seq) {
+                let frame = s.dedup.get(&dkey).cloned();
+                if let (Some(pending), Some(frame)) = (s.pending_load.as_mut(), frame) {
+                    pending.ack_frame = Some(frame);
+                }
+            }
+        }
         let reg2 = reg.clone();
         let sid2 = sid.to_string();
         let load_timeout = reg.load_timeout;
@@ -2352,9 +2799,16 @@ impl Inner {
                 return;
             }
         }
-        if let Some(s) = self.session_mut(sid) {
+        let trigger_ack = if let Some(s) = self.session_mut(sid) {
+            let ack = s
+                .pending_load
+                .as_ref()
+                .and_then(|j| j.ack_frame.clone());
             s.pending_load = None;
-        }
+            ack
+        } else {
+            None
+        };
         let manifest = match result {
             Err(e) => {
                 self.load_failed(sid, &e);
@@ -2402,11 +2856,90 @@ impl Inner {
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
             s.ready.clear();
+            // The epoch reset carries exactly one outcome: the ACK of the
+            // load request whose resolver generation actually committed.
+            // Other load-request outcomes do not cross as replayable ACKs —
+            // OPEN_WORK skips the epoch gate, so a replayable stale ACK would
+            // make a superseded pick look accepted, and dropping the key
+            // entirely would make its resend execute again. Tombstone those
+            // keys instead. Ordinary epoch-gated op entries still reset with
+            // the epoch; pre-existing tombstones never do.
+            let carry_key = format!("{}:{}", job.role, job.request_id);
+            // The job-retained ACK is authoritative: unlike the fixed dedup
+            // window, it cannot be evicted by unrelated traffic while the
+            // resolver is in flight. Keep a cache scan only as a defensive
+            // fallback for internally constructed sessions that predate the
+            // retention field being populated.
+            // The trigger is the request whose resolution committed this
+            // epoch — whatever op started the job (OPEN_WORK or SET_OFFSET).
+            // This is deliberately NOT dedup_frame_needs_cross_epoch_tombstone: that predicate
+            // scopes cross-epoch tombstone protection to OPEN_WORK (the only
+            // epoch-gate-exempt op), while the carry must cover the job kind
+            // that actually triggered the rollover. A SET_OFFSET load ACK
+            // must ride the epoch too, or its resend is answered
+            // stale_request (evicted pre-commit) or stale_epoch (dropped at
+            // the rollover) instead of the identical ACK.
+            let valid_trigger = |frame: &Value| {
+                frame
+                    .get("request")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_lowercase)
+                    .as_deref()
+                    == Some(job.kind.as_str())
+                    && frame.get("type").and_then(|v| v.as_str()) == Some("ACK")
+                    && frame.get("requestId").and_then(|v| v.as_str())
+                        == Some(job.request_id.as_str())
+            };
+            let mut carried: Option<(String, Value)> = trigger_ack
+                .as_ref()
+                .filter(|frame| valid_trigger(frame))
+                .map(|frame| (carry_key.clone(), frame.clone()));
+            let mut new_tombstones: Vec<String> = Vec::new();
+            for key in &s.dedup_order {
+                let Some(frame) = s.dedup.get(key) else {
+                    continue;
+                };
+                let is_load = dedup_frame_needs_cross_epoch_tombstone(frame);
+                let is_trigger_ack = *key == carry_key && valid_trigger(frame);
+                if is_trigger_ack {
+                    if carried.is_none() {
+                        carried = Some((key.clone(), frame.clone()));
+                    }
+                } else if is_load {
+                    new_tombstones.push(key.clone());
+                }
+            }
+            for key in new_tombstones {
+                dedup_tombstone(s, key, true);
+            }
             s.dedup.clear();
             s.dedup_order.clear();
-            s.dedup_seen.clear();
-            s.dedup_seen_order.clear();
-            s.selecting = false;
+            if let Some((key, frame)) = carried {
+                s.dedup.insert(key.clone(), frame);
+                s.dedup_order.push_back(key);
+            } else if job.kind == "open_work" {
+                // Losing the trigger outcome must never make its retransmission
+                // executable again. This should be unreachable now that the job
+                // retains the ACK, but fail closed if the invariant is broken.
+                // Only OPEN_WORK needs the tombstone: epoch-gated trigger kinds
+                // (SET_OFFSET) are already stopped by the epoch check, so
+                // spending the OPEN_WORK-only budget on them would be pure loss.
+                dedup_tombstone(s, carry_key, true);
+            }
+            // A successful OPEN_WORK commit is the authoritative end of the
+            // shared browse regardless of which member opened it — and a
+            // causal epoch boundary even when browse was never open. Casual
+            // first-pick traffic is untagged (generation 0), so only
+            // advancing the epoch here lets the untagged-straggler drop
+            // distinguish pre-commit mirror frames from post-commit ones;
+            // without it a frame emitted before the first commit could
+            // cross the load and surface over the reading screen. The
+            // increment happens exactly once per commit whether or not it
+            // also closes an open browse.
+            s.browse_generation += 1;
+            s.browse_open = false;
+            s.browse_opener_id = None;
+            s.committed_load_auto = Some(job.auto);
             s.apply_seq += 1;
         }
         let Some(frame) = self.state_frame_for(sid) else {
@@ -2431,6 +2964,12 @@ impl Inner {
             frame["revision"]
         );
         self.broadcast(sid, &frame);
+        // The epoch rollover above can push surviving window entries into
+        // the load tombstone set; if that crossed the budget the session is
+        // already fully committed, so teardown here loses nothing.
+        if self.session(sid).is_some_and(|s| s.condemned) {
+            self.end_session(sid, END_DEDUP_EXHAUSTED);
+        }
     }
 
     /// Work-load failure: typed ERROR frame + current STATE.
@@ -2496,6 +3035,10 @@ impl Inner {
 
     /// `_state_frame` — bumps revision, derives phase, emits STATE.
     fn state_frame_for(&mut self, sid: &str) -> Option<Value> {
+        let server_features = self.server_features_json();
+        let browse_visible = self
+            .session(sid)
+            .is_some_and(|s| self.member_drive_intersection(s));
         let Inner {
             sessions, links, ..
         } = self;
@@ -2507,11 +3050,22 @@ impl Inner {
             let mut p = Map::new();
             p.insert("role".into(), Value::String(m.role.clone()));
             p.insert("status".into(), Value::String(m.status.clone()));
+            p.insert("trust".into(), Value::String(m.trust.clone()));
+            p.insert(
+                "features".into(),
+                Value::Array(
+                    m.capabilities
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
             p.insert("name".into(), Value::String(m.name.clone()));
             p.insert("ready".into(), Value::Bool(s.ready.contains(&m.id)));
             presence.insert(m.id.clone(), Value::Object(p));
         }
-        Some(protocol::frame(&[
+        let mut frame = protocol::frame(&[
             ("v", Value::from(protocol::PROTOCOL_VERSION)),
             ("type", Value::String("STATE".into())),
             ("sessionId", Value::String(s.id.clone())),
@@ -2530,7 +3084,51 @@ impl Inner {
             ("leaderSide", Value::String(s.leader_side.clone())),
             ("presence", Value::Object(presence)),
             ("dataPlane", Value::String(s.data_plane.clone())),
-        ]))
+            ("features", server_features),
+        ]);
+        if browse_visible && s.browse_open {
+            // `paused` outranks selecting in the derived phase, so the
+            // phase alone cannot represent a still-open shared browse. In
+            // member-drive semantics expose the orthogonal boolean; the
+            // true-only open encoding keeps legacy/mixed-pair open frames
+            // unchanged. Opener metadata is additive alongside `browse:true`.
+            if let Value::Object(ref mut obj) = frame {
+                obj.insert("browse".into(), Value::Bool(true));
+                obj.insert(
+                    "browseGeneration".into(),
+                    Value::from(s.browse_generation),
+                );
+                if let Some(opener) = &s.browse_opener_id {
+                    obj.insert("browseOpener".into(), Value::String(opener.clone()));
+                    if let Some(role) = s
+                        .members
+                        .iter()
+                        .find(|m| &m.id == opener)
+                        .map(|m| m.role.clone())
+                    {
+                        obj.insert("browseOpenerRole".into(), Value::String(role));
+                    }
+                }
+            }
+        } else if !s.browse_open && s.browse_generation > 0 {
+            // A close must remain observable even when the same transition
+            // removed the member-drive intersection (a RESUME capability
+            // downgrade), and even to a client that missed the close while
+            // offline. Once a generation has existed, closed states therefore
+            // carry an additive explicit false plus the monotonically
+            // increasing generation. Capability-unaware clients ignore both
+            // fields; pre-first-open frames carry no browse metadata, preserving
+            // the legacy browse encoding (the STATE as a whole still has other
+            // additive fields such as features/trust).
+            if let Value::Object(ref mut obj) = frame {
+                obj.insert("browse".into(), Value::Bool(false));
+                obj.insert(
+                    "browseGeneration".into(),
+                    Value::from(s.browse_generation),
+                );
+            }
+        }
+        Some(frame)
     }
 
     fn broadcast(&mut self, sid: &str, frame: &Value) {
@@ -2735,6 +3333,48 @@ impl Inner {
     }
 }
 
+fn dedup_frame_needs_cross_epoch_tombstone(frame: &Value) -> bool {
+    // OPEN_WORK is the one op that skips the epoch/manifestVersion/base
+    // gates (see sequenced_op), so it is the only op whose replay needs
+    // tombstone protection past an epoch rollover. SET_OFFSET replays are
+    // already stopped by those gates and stay in the ordinary FIFO set.
+    matches!(
+        frame.get("request").and_then(|v| v.as_str()),
+        Some("OPEN_WORK")
+    )
+}
+
+/// Remember an evicted dedup key without storing its outcome. Ordinary
+/// tombstones are FIFO-capped; OPEN_WORK tombstones are budgeted in a
+/// separate set because a forgotten one turns a replay into executable
+/// state again. The budget is a hard cap: once it is exceeded the session
+/// is condemned and torn down after the current dispatch, rather than
+/// silently aging entries out (correctness loss) or growing memory
+/// without bound (availability loss).
+fn dedup_tombstone(s: &mut PairSession, key: String, load_op: bool) {
+    if load_op {
+        s.dedup_load_seen.insert(key);
+        if s.dedup_load_seen.len() > DEDUP_LOAD_TOMBSTONE_MAX {
+            s.condemned = true;
+        }
+        return;
+    }
+    if s.dedup_seen.insert(key.clone()) {
+        s.dedup_seen_order.push_back(key);
+    }
+    while s.dedup_seen.len() > DEDUP_TOMBSTONE_MAX {
+        if let Some(o) = s.dedup_seen_order.pop_front() {
+            s.dedup_seen.remove(&o);
+        } else {
+            break;
+        }
+    }
+}
+
+fn dedup_has_tombstone(s: &PairSession, key: &str) -> bool {
+    s.dedup_seen.contains(key) || s.dedup_load_seen.contains(key)
+}
+
 fn req_id<'a>(req: &'a Map<String, Value>) -> Option<&'a str> {
     req.get("requestId").and_then(|v| v.as_str())
 }
@@ -2742,6 +3382,7 @@ fn req_id<'a>(req: &'a Map<String, Value>) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn mk_link(inner: &mut Inner) -> (String, mpsc::Receiver<OutItem>) {
         let (id, rx, _) = mk_link_full(inner, Some(Value::Null), None);
@@ -2801,6 +3442,119 @@ mod tests {
             PathBuf::from("/nonexistent"),
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn disabled_member_drive_is_not_advertised() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        inner.member_drive_enabled = false;
+        assert!(inner.server_features().is_empty());
+        assert_eq!(inner.server_features_json(), Value::Array(Vec::new()));
+    }
+
+    fn feature_payload(caps: &[&str]) -> Value {
+        protocol::frame(&[(
+            "features",
+            Value::Array(caps.iter().map(|c| Value::String((*c).into())).collect()),
+        )])
+    }
+
+    fn req_named(t: &str, sid: &str, payload: Value, rid: &str) -> Map<String, Value> {
+        let mut r = req(t, sid, payload);
+        r.insert("requestId".into(), Value::String(rid.into()));
+        r
+    }
+
+    fn drain_texts(rx: &mut mpsc::Receiver<OutItem>) -> Vec<Value> {
+        let mut out = Vec::new();
+        while let Ok(item) = rx.try_recv() {
+            if let OutItem::Text(s) = item {
+                out.push(serde_json::from_str(&s).unwrap());
+            }
+        }
+        out
+    }
+
+    /// Small but fully valid resolver output — digest, spread table and the
+    /// resolver-added initial ref all pass finish_load's validation.
+    fn test_manifest() -> Value {
+        let pages = vec![
+            json!({"folder": "work", "name": "p001.png"}),
+            json!({"folder": "work", "name": "p002.png"}),
+        ];
+        let chapters = json!([{
+            "name": "c0",
+            "folder": "work",
+            "pages": pages.clone(),
+        }]);
+        let plan_chapters = json!([{
+            "folder": "work",
+            "pages": ["p001.png", "p002.png"],
+        }]);
+        let plan = model::build_spread_plan(plan_chapters.as_array().unwrap(), 0).unwrap();
+        let spread_table: Vec<Value> = plan.iter().map(model::serialize_spread).collect();
+        let mut manifest = json!({
+            "v": protocol::PROTOCOL_VERSION,
+            "folder": "work",
+            "offset": 0,
+            "chapters": chapters,
+            "pageRefs": pages,
+            "spreadTable": spread_table,
+        });
+        let digest = catalog::manifest_digest(&manifest).unwrap();
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .insert("digest".into(), Value::String(digest));
+        catalog::finish_resolve(
+            manifest,
+            &model::PageRef {
+                folder: "work".into(),
+                name: "p001.png".into(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn sequenced_ack(request: &str, request_id: &str, sid: &str) -> Value {
+        protocol::frame(&[
+            ("v", Value::from(protocol::PROTOCOL_VERSION)),
+            ("type", Value::String("ACK".into())),
+            ("requestId", Value::String(request_id.into())),
+            ("request", Value::String(request.into())),
+            ("sessionId", Value::String(sid.into())),
+            ("data", Value::Object(Map::new())),
+        ])
+    }
+
+    /// Paired two-member session whose admission-time capability lists are
+    /// controlled by the test. Returns (session, leader link, follower link,
+    /// follower member).
+    fn paired_session(
+        inner: &mut Inner,
+        reg: &Arc<Registry>,
+        l1: &str,
+        r1: &mut mpsc::Receiver<OutItem>,
+        l2: &str,
+        r2: &mut mpsc::Receiver<OutItem>,
+        leader_caps: &[&str],
+        follower_caps: &[&str],
+    ) -> (String, String) {
+        inner.dispatch(reg, l1, &req_named("CREATE", "", feature_payload(leader_caps), "pc-create"));
+        let ack1 = next_json(r1);
+        let sid = ack1["data"]["sessionId"].as_str().unwrap().to_string();
+        let code = ack1["data"]["code"].as_str().unwrap().to_string();
+        let join_payload = protocol::frame(&[
+            ("code", Value::String(code)),
+            ("features", feature_payload(follower_caps)["features"].clone()),
+        ]);
+        inner.dispatch(reg, l2, &req_named("JOIN", "", join_payload, "pc-join"));
+        let ack2 = next_json(r2);
+        let mid2 = ack2["data"]["memberId"].as_str().unwrap().to_string();
+        let approve = protocol::frame(&[("memberId", Value::String(mid2.clone()))]);
+        inner.dispatch(reg, l1, &req_named("APPROVE", &sid, approve, "pc-approve"));
+        (sid, mid2)
     }
 
     #[tokio::test]
@@ -3120,7 +3874,7 @@ mod tests {
         let _ = next_json(&mut r1); // STATE
         let sid = ack["data"]["sessionId"].as_str().unwrap().to_string();
         let gt = ack["data"]["guestToken"].as_str().unwrap().to_string();
-        let (l2, mut r2, mut gclose) =
+        let (l2, mut r2, gclose) =
             mk_link_full(&mut inner, Some(Value::Null), Some(gt.clone()));
         let _ = next_json(&mut r2); // HELLO
         inner.dispatch(
@@ -3230,6 +3984,869 @@ mod tests {
         assert_eq!(ack["type"], "ACK");
         assert!(ack["data"]["guestToken"].is_null());
         assert_eq!(ack["data"]["role"], "leader");
+    }
+
+    #[tokio::test]
+    async fn guest_ui_sync_cannot_start_closed_shared_browse() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let leader_user = protocol::frame(&[
+            ("name", "Leader".into()),
+            ("email", "leader@example.com".into()),
+        ]);
+        let (l1, mut r1, _c1) = mk_link_full(&mut inner, Some(leader_user), None);
+        let _ = next_json(&mut r1); // HELLO
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named("CREATE", "", feature_payload(&[CAP_MEMBER_DRIVE]), "gus-create"),
+        );
+        let ack = next_json(&mut r1);
+        let sid = ack["data"]["sessionId"].as_str().unwrap().to_string();
+        let gt = ack["data"]["guestToken"].as_str().unwrap().to_string();
+        let _ = next_json(&mut r1); // waiting STATE
+
+        let (l2, mut r2, _c2) =
+            mk_link_full(&mut inner, Some(Value::Null), Some(gt.clone()));
+        let _ = next_json(&mut r2); // HELLO
+        let join_payload = protocol::frame(&[
+            ("guestToken", Value::String(gt)),
+            ("features", feature_payload(&[CAP_MEMBER_DRIVE])["features"].clone()),
+        ]);
+        inner.dispatch(&reg, &l2, &req_named("JOIN", "", join_payload, "gus-join"));
+        let ack2 = next_json(&mut r2);
+        let mid2 = ack2["data"]["memberId"].as_str().unwrap().to_string();
+        let approve = protocol::frame(&[("memberId", Value::String(mid2))]);
+        inner.dispatch(&reg, &l1, &req_named("APPROVE", &sid, approve, "gus-approve"));
+
+        let ui = || {
+            protocol::frame(&[
+                ("view", "browse".into()),
+                ("path", Value::Null),
+                ("top", Value::from(0)),
+                ("viewH", Value::from(600)),
+            ])
+        };
+        // No member has opened shared browse yet (the initial pre-commit
+        // selecting phase is not itself an open browse). A guest UI_SYNC must
+        // not become a de facto open on the host.
+        inner.dispatch(&reg, &l2, &req_named("UI_SYNC", &sid, ui(), "guest-ui-closed"));
+        let frames: Vec<Value> = std::iter::from_fn(|| match r2.try_recv() {
+            Ok(OutItem::Text(raw)) => serde_json::from_str(&raw).ok(),
+            _ => None,
+        })
+        .collect();
+        assert!(frames.iter().any(|f| {
+            f["type"] == "REJECT"
+                && f["requestId"] == "guest-ui-closed"
+                && f["reason"] == REASON_FORBIDDEN
+        }), "guest UI_SYNC while browse is closed must be forbidden: {frames:?}");
+        let leader_frames: Vec<Value> = std::iter::from_fn(|| match r1.try_recv() {
+            Ok(OutItem::Text(raw)) => serde_json::from_str(&raw).ok(),
+            _ => None,
+        })
+        .collect();
+        assert!(!leader_frames.iter().any(|f| f["type"] == "UI_SYNC"),
+            "closed-browse guest frame must not reach the host: {leader_frames:?}");
+
+        // Once a member really opens shared browse, ordinary ephemeral mirror
+        // frames remain relayable — the prohibition is on STARTING it, not on
+        // participating in an already-open mirror.
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "selecting".into())]),
+                "member-open",
+            ),
+        );
+        // Both sides advertise member-drive, so legitimate frames are
+        // generation-tagged — an untagged frame would drop as a straggler.
+        let mut tagged = ui();
+        tagged["browseGeneration"] = Value::from(1);
+        inner.dispatch(&reg, &l2, &req_named("UI_SYNC", &sid, tagged, "guest-ui-open"));
+        let mut forwarded = false;
+        while let Ok(OutItem::Text(raw)) = r1.try_recv() {
+            let f: Value = serde_json::from_str(&raw).unwrap();
+            if f["type"] == "UI_SYNC" {
+                forwarded = true;
+                break;
+            }
+        }
+        assert!(forwarded, "open shared browse must still relay guest mirror frames");
+    }
+
+    #[tokio::test]
+    async fn member_ui_sync_pre_commit_picking_mirror_relays() {
+        // Before the first work commit there is no shared browse to open:
+        // member mirror traffic is the casual picking mirror (the picking
+        // process itself is shared) and relays even though nothing was
+        // opened — exactly as it did before the shared-browse encoding.
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner, &reg, &l1, &mut r1, &l2, &mut r2,
+            &[CAP_MEMBER_DRIVE], &[CAP_MEMBER_DRIVE],
+        );
+        assert!(inner.session(&sid).unwrap().manifest.is_none());
+        let ui = || {
+            protocol::frame(&[
+                ("view", "browse".into()),
+                ("path", Value::Null),
+                ("top", Value::from(0)),
+                ("viewH", Value::from(600)),
+            ])
+        };
+        inner.dispatch(&reg, &l2, &req_named("UI_SYNC", &sid, ui(), "member-ui-precommit"));
+        let sender_frames: Vec<Value> = std::iter::from_fn(|| match r2.try_recv() {
+            Ok(OutItem::Text(raw)) => serde_json::from_str(&raw).ok(),
+            _ => None,
+        }).collect();
+        assert!(
+            !sender_frames.iter().any(|f| f["type"] == "REJECT"),
+            "a member picking mirror must not be forbidden: {sender_frames:?}"
+        );
+        let leader_frames: Vec<Value> = std::iter::from_fn(|| match r1.try_recv() {
+            Ok(OutItem::Text(raw)) => serde_json::from_str(&raw).ok(),
+            _ => None,
+        }).collect();
+        assert!(
+            leader_frames.iter().any(|f| f["type"] == "UI_SYNC"),
+            "the picking mirror must relay to the peer pre-commit: {leader_frames:?}"
+        );
+
+        inner.dispatch(
+            &reg,
+            &l2,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "selecting".into())]),
+                "member-open-ui",
+            ),
+        );
+        let mut tagged = ui();
+        tagged["browseGeneration"] = Value::from(1);
+        inner.dispatch(&reg, &l2, &req_named("UI_SYNC", &sid, tagged, "member-ui-open"));
+        let mut forwarded = false;
+        while let Ok(OutItem::Text(raw)) = r1.try_recv() {
+            let f: Value = serde_json::from_str(&raw).unwrap();
+            if f["type"] == "UI_SYNC" {
+                forwarded = true;
+                break;
+            }
+        }
+        assert!(forwarded);
+    }
+
+    #[tokio::test]
+    async fn guest_member_cannot_resume_with_member_credential() {
+        // Reverse direction of the trust-mismatch matrix: admission fixed the
+        // follower's trust as guest, so presenting a member session cookie on
+        // RESUME must still fail closed rather than upgrading the bearer.
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let leader_user = protocol::frame(&[
+            ("name", "Leader".into()),
+            ("email", "leader@example.com".into()),
+        ]);
+        let (l1, mut r1, _c1) = mk_link_full(&mut inner, Some(leader_user.clone()), None);
+        let _ = next_json(&mut r1);
+        inner.dispatch(&reg, &l1, &req_named("CREATE", "", feature_payload(&[]), "tm-create"));
+        let ack = next_json(&mut r1);
+        let sid = ack["data"]["sessionId"].as_str().unwrap().to_string();
+        let gt = ack["data"]["guestToken"].as_str().unwrap().to_string();
+
+        let (lg, mut rg, _cg) = mk_link_full(&mut inner, Some(Value::Null), Some(gt.clone()));
+        let _ = next_json(&mut rg);
+        inner.dispatch(
+            &reg,
+            &lg,
+            &req_named(
+                "JOIN",
+                "",
+                protocol::frame(&[("guestToken", Value::String(gt))]),
+                "tm-join",
+            ),
+        );
+        let join_ack = next_json(&mut rg);
+        let mid = join_ack["data"]["memberId"].as_str().unwrap().to_string();
+        let token = join_ack["data"]["resumeToken"].as_str().unwrap().to_string();
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "APPROVE",
+                &sid,
+                protocol::frame(&[("memberId", Value::String(mid.clone()))]),
+                "tm-approve",
+            ),
+        );
+        inner.detach_link(&lg);
+
+        let (lm, mut rm, _cm) = mk_link_full(&mut inner, Some(leader_user), None);
+        let _ = next_json(&mut rm);
+        inner.dispatch(
+            &reg,
+            &lm,
+            &req_named(
+                "RESUME",
+                &sid,
+                protocol::frame(&[
+                    ("memberId", Value::String(mid)),
+                    ("resumeToken", Value::String(token)),
+                ]),
+                "tm-resume",
+            ),
+        );
+        let mut rej = Value::Null;
+        while let Ok(OutItem::Text(raw)) = rm.try_recv() {
+            let f: Value = serde_json::from_str(&raw).unwrap();
+            if f["type"] == "REJECT" && f["requestId"] == "tm-resume" {
+                rej = f;
+                break;
+            }
+        }
+        assert_eq!(rej["reason"], REASON_TRUST_MISMATCH);
+    }
+
+    #[tokio::test]
+    async fn mixed_capability_pair_keeps_leader_only_browse_close() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner, &reg, &l1, &mut r1, &l2, &mut r2, &[CAP_MEMBER_DRIVE], &[],
+        );
+        // A one-sided advertisement is not an intersection: follower open is
+        // still leader-only even though the new-capable leader is present.
+        inner.dispatch(
+            &reg,
+            &l2,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "selecting".into())]),
+                "legacy-open",
+            ),
+        );
+        let mut rej = Value::Null;
+        for _ in 0..8 {
+            match r2.try_recv() {
+                Ok(OutItem::Text(raw)) => {
+                    let f: Value = serde_json::from_str(&raw).unwrap();
+                    if f["type"] == "REJECT" && f["requestId"] == "legacy-open" {
+                        rej = f;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(rej["type"], "REJECT");
+        assert_eq!(rej["reason"], REASON_NOT_LEADER);
+        assert!(!inner.session(&sid).unwrap().browse_open);
+        // Leader opens; follower close is inert; leader non-selecting activity closes.
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "selecting".into())]),
+                "leader-open",
+            ),
+        );
+        assert!(inner.session(&sid).unwrap().browse_open);
+        inner.dispatch(
+            &reg,
+            &l2,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[
+                    ("state", "active".into()),
+                    ("endBrowse", Value::Bool(true)),
+                ]),
+                "follower-close",
+            ),
+        );
+        assert!(inner.session(&sid).unwrap().browse_open);
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "active".into())]),
+                "leader-close",
+            ),
+        );
+        assert!(!inner.session(&sid).unwrap().browse_open);
+    }
+
+    #[tokio::test]
+    async fn resume_capability_downgrade_closes_shared_browse() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, mid2) = paired_session(
+            &mut inner, &reg, &l1, &mut r1, &l2, &mut r2,
+            &[CAP_MEMBER_DRIVE], &[CAP_MEMBER_DRIVE],
+        );
+        inner.dispatch(
+            &reg,
+            &l2,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "selecting".into())]),
+                "downgrade-open",
+            ),
+        );
+        assert!(inner.session(&sid).unwrap().browse_open);
+
+        let token = inner
+            .session(&sid)
+            .and_then(|s| s.members.iter().find(|m| m.id == mid2))
+            .map(|m| m.resume_token.clone())
+            .unwrap();
+        inner.detach_link(&l2);
+        let (l3, mut r3) = mk_link(&mut inner);
+        let _ = next_json(&mut r3); // HELLO
+        inner.dispatch(
+            &reg,
+            &l3,
+            &req_named(
+                "RESUME",
+                &sid,
+                protocol::frame(&[
+                    ("memberId", Value::String(mid2.clone())),
+                    ("resumeToken", Value::String(token)),
+                    ("features", Value::Array(vec![])),
+                ]),
+                "downgrade-resume",
+            ),
+        );
+        let ack = next_json(&mut r3);
+        assert_eq!(ack["type"], "ACK");
+        let state = next_json(&mut r3);
+        assert_eq!(state["type"], "STATE");
+        assert!(!inner.session(&sid).unwrap().browse_open);
+        assert_eq!(state.get("browse"), Some(&Value::Bool(false)),
+            "capability-loss close must stay explicit after the intersection is gone: {state:?}");
+        assert_eq!(state.get("browseGeneration"), Some(&Value::from(2)),
+            "the close is itself an epoch transition: generation advances past the open epoch");
+        assert_eq!(state["presence"][mid2]["features"], Value::Array(vec![]));
+    }
+
+    #[tokio::test]
+    async fn trigger_ack_retained_on_job_survives_dedup_eviction_until_commit() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner,
+            &reg,
+            &l1,
+            &mut r1,
+            &l2,
+            &mut r2,
+            &[CAP_MEMBER_DRIVE],
+            &[CAP_MEMBER_DRIVE],
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+
+        let page = protocol::frame(&[
+            ("folder", "work".into()),
+            ("name", "p001.png".into()),
+        ]);
+        let payload = protocol::frame(&[
+            ("folder", "work".into()),
+            ("page", page),
+        ]);
+        let open = req_named("OPEN_WORK", &sid, payload, "trigger-open");
+        inner.dispatch(&reg, &l1, &open);
+        let job = inner
+            .session(&sid)
+            .and_then(|s| s.pending_load.clone())
+            .expect("accepted OPEN_WORK leaves a pending load");
+        assert!(
+            job.ack_frame.is_some(),
+            "the accepted trigger outcome must be retained outside the cache"
+        );
+
+        // unrelated sequenced outcomes fill the fixed window while the load is
+        // still unresolved. The trigger ACK leaves `dedup` and becomes only a
+        // tombstone there; the job copy is the sole replayable outcome.
+        for i in 0..DEDUP_WINDOW {
+            let rid = format!("filler-{i}");
+            let frame = sequenced_ack("TURN", &rid, &sid);
+            let key = format!("leader:{rid}");
+            inner.dedup_store(&sid, &key, frame);
+        }
+        let trigger_key = "leader:trigger-open";
+        {
+            let s = inner.session(&sid).unwrap();
+            assert!(!s.dedup.contains_key(trigger_key));
+            assert!(dedup_has_tombstone(s, trigger_key));
+        }
+
+        inner.finish_load(&sid, &job, Ok(test_manifest()));
+        {
+            let s = inner.session(&sid).unwrap();
+            assert_eq!(s.work_epoch, 1);
+            let carried = s
+                .dedup
+                .get(trigger_key)
+                .expect("trigger ACK must carry across the epoch commit");
+            assert_eq!(carried["type"], "ACK");
+            assert_eq!(carried["requestId"], "trigger-open");
+        }
+
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+        inner.dispatch(&reg, &l1, &open);
+        let frames = drain_texts(&mut r1);
+        assert_eq!(
+            frames.len(),
+            1,
+            "a replay must be the cached ACK alone, never a second commit: {frames:?}"
+        );
+        assert_eq!(frames[0]["type"], "ACK");
+        assert_eq!(frames[0]["requestId"], "trigger-open");
+        assert!(inner.session(&sid).unwrap().pending_load.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_offset_trigger_ack_carries_across_epoch_commit() {
+        // SET_OFFSET is a load job too: a non-no-op flip starts a resolver
+        // whose commit rolls the epoch. Its trigger ACK must carry across the
+        // rollover exactly like OPEN_WORK's — otherwise a post-commit resend
+        // is answered stale_request instead of the identical ACK, and the
+        // fail-closed path would burn OPEN_WORK-only tombstone budget on a
+        // key the epoch gate already protects.
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner,
+            &reg,
+            &l1,
+            &mut r1,
+            &l2,
+            &mut r2,
+            &[CAP_MEMBER_DRIVE],
+            &[CAP_MEMBER_DRIVE],
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+
+        // Open a work so SET_OFFSET has something to resolve against.
+        let page = protocol::frame(&[
+            ("folder", "work".into()),
+            ("name", "p001.png".into()),
+        ]);
+        let open_payload = protocol::frame(&[
+            ("folder", "work".into()),
+            ("page", page),
+        ]);
+        let open = req_named("OPEN_WORK", &sid, open_payload, "open-1");
+        inner.dispatch(&reg, &l1, &open);
+        let job1 = inner
+            .session(&sid)
+            .and_then(|s| s.pending_load.clone())
+            .expect("OPEN_WORK leaves a pending load");
+        inner.finish_load(&sid, &job1, Ok(test_manifest()));
+        assert_eq!(inner.session(&sid).unwrap().work_epoch, 1);
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+
+        // A non-no-op flip starts a second load job. The session is at epoch
+        // 1 after the open commit, and SET_OFFSET is epoch-gated.
+        let flip_payload = protocol::frame(&[("offset", Value::from(1))]);
+        let mut flip = req_named("SET_OFFSET", &sid, flip_payload, "flip-1");
+        {
+            let s = inner.session(&sid).unwrap();
+            flip.insert("workEpoch".into(), Value::from(s.work_epoch));
+            flip.insert("baseRevision".into(), Value::from(s.revision));
+        }
+        inner.dispatch(&reg, &l1, &flip);
+        let job2 = inner
+            .session(&sid)
+            .and_then(|s| s.pending_load.clone())
+            .expect("non-no-op SET_OFFSET starts a load job");
+        assert_eq!(job2.kind, "set_offset");
+        inner.finish_load(&sid, &job2, Ok(test_manifest()));
+        {
+            let s = inner.session(&sid).unwrap();
+            assert_eq!(s.work_epoch, 2);
+            let carried = s
+                .dedup
+                .get("leader:flip-1")
+                .expect("SET_OFFSET trigger ACK must carry across its epoch commit");
+            assert_eq!(carried["type"], "ACK");
+            assert_eq!(carried["request"], "SET_OFFSET");
+            assert!(
+                !s.dedup_load_seen.contains("leader:flip-1"),
+                "an epoch-gated trigger must not consume OPEN_WORK tombstone budget"
+            );
+        }
+
+        // Resend: the identical cached ACK alone, never stale_request,
+        // never a second load.
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+        inner.dispatch(&reg, &l1, &flip);
+        let frames = drain_texts(&mut r1);
+        assert_eq!(
+            frames.len(),
+            1,
+            "resend must replay the cached ACK alone: {frames:?}"
+        );
+        assert_eq!(frames[0]["type"], "ACK");
+        assert_eq!(frames[0]["requestId"], "flip-1");
+        assert!(inner.session(&sid).unwrap().pending_load.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_tombstone_survives_overflow_and_replay_fails_closed() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner,
+            &reg,
+            &l1,
+            &mut r1,
+            &l2,
+            &mut r2,
+            &[CAP_MEMBER_DRIVE],
+            &[CAP_MEMBER_DRIVE],
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+
+        let load_key = "leader:evicted-load";
+        inner.dedup_store(
+            &sid,
+            load_key,
+            sequenced_ack("OPEN_WORK", "evicted-load", &sid),
+        );
+        // Evict the full load outcome through the real fixed-window path.
+        // Classification at this edge — not a test-only backdoor — is what
+        // places the key in the dedicated load tombstone area.
+        for i in 0..DEDUP_WINDOW {
+            let rid = format!("evict-filler-{i}");
+            let frame = sequenced_ack("TURN", &rid, &sid);
+            inner.dedup_store(&sid, &format!("leader:{rid}"), frame);
+        }
+        {
+            let s = inner.session_mut(&sid).unwrap();
+            assert!(!s.dedup.contains_key(load_key));
+            assert!(s.dedup_load_seen.contains(load_key));
+            s.dedup_seen.clear();
+            s.dedup_seen_order.clear();
+            for i in 0..=DEDUP_TOMBSTONE_MAX {
+                dedup_tombstone(s, format!("leader:filler-{i}"), false);
+            }
+            assert!(
+                dedup_has_tombstone(s, load_key),
+                "ordinary tombstone FIFO overflow must not erase a load key"
+            );
+            assert!(
+                !s.dedup_seen.contains("leader:filler-0"),
+                "the ordinary FIFO really overflowed"
+            );
+        }
+
+        let page = protocol::frame(&[
+            ("folder", "work".into()),
+            ("name", "p001.png".into()),
+        ]);
+        let payload = protocol::frame(&[
+            ("folder", "work".into()),
+            ("page", page),
+        ]);
+        let resend = req_named("OPEN_WORK", &sid, payload, "evicted-load");
+        inner.dispatch(&reg, &l1, &resend);
+        let frames = drain_texts(&mut r1);
+        assert_eq!(frames.len(), 1, "unexpected frames: {frames:?}");
+        assert_eq!(frames[0]["type"], "REJECT");
+        assert_eq!(frames[0]["reason"], state::REASON_STALE_REQUEST);
+        assert!(inner.session(&sid).unwrap().pending_load.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_tombstone_overflow_condemns_and_ends_session() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner,
+            &reg,
+            &l1,
+            &mut r1,
+            &l2,
+            &mut r2,
+            &[CAP_MEMBER_DRIVE],
+            &[CAP_MEMBER_DRIVE],
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+
+        // Exceed the dedicated budget through the tombstone primitive itself.
+        // Honest sessions never come close — a work pick is human-scale — so
+        // crossing it means a flood, and the session must die rather than
+        // choose between unbounded memory and dropped replay protection.
+        {
+            let s = inner.session_mut(&sid).unwrap();
+            for i in 0..=DEDUP_LOAD_TOMBSTONE_MAX {
+                dedup_tombstone(s, format!("leader:flood-{i}"), true);
+            }
+            assert!(s.condemned);
+        }
+        // The teardown fires only after the next dispatch unwinds.
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "active".into())]),
+                "post-flood-ping",
+            ),
+        );
+        let frames1 = drain_texts(&mut r1);
+        let frames2 = drain_texts(&mut r2);
+        let end1 = frames1.iter().find(|f| f["type"] == "END");
+        let end2 = frames2.iter().find(|f| f["type"] == "END");
+        assert!(
+            end1.is_some_and(|f| f["reason"] == END_DEDUP_EXHAUSTED),
+            "leader must see the exhausted END: {frames1:?}"
+        );
+        assert!(
+            end2.is_some_and(|f| f["reason"] == END_DEDUP_EXHAUSTED),
+            "follower must see the exhausted END: {frames2:?}"
+        );
+        assert!(inner.session(&sid).is_none());
+    }
+
+    #[tokio::test]
+    async fn ui_sync_generation_boundary_drop() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner,
+            &reg,
+            &l1,
+            &mut r1,
+            &l2,
+            &mut r2,
+            &[CAP_MEMBER_DRIVE],
+            &[CAP_MEMBER_DRIVE],
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+
+        let ui = |gen: Option<i64>| {
+            let mut p = protocol::frame(&[
+                ("view", "browse".into()),
+                ("top", Value::from(10)),
+                ("viewH", Value::from(100)),
+            ]);
+            if let Some(g) = gen {
+                p["browseGeneration"] = Value::from(g);
+            }
+            req_named("UI_SYNC", &sid, p, "ui")
+        };
+        let relayed_gen = |rx: &mut mpsc::Receiver<OutItem>| -> Option<i64> {
+            drain_texts(rx)
+                .iter()
+                .find(|f| f["type"] == "UI_SYNC")
+                .and_then(|f| f["payload"]["browseGeneration"].as_i64())
+        };
+
+        // Open the shared browse — generation 1 begins.
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "selecting".into())]),
+                "open-1",
+            ),
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+        assert_eq!(
+            inner.session(&sid).unwrap().browse_generation,
+            1,
+            "the first closed-to-open transition owns generation 1"
+        );
+
+        // Matching generation relays; mismatched drops. Untagged drops too:
+        // both members advertise member-drive, so every legitimate build
+        // tags — an untagged frame can only be a pre-upgrade straggler.
+        inner.dispatch(&reg, &l1, &ui(Some(1)));
+        assert_eq!(relayed_gen(&mut r2), Some(1));
+        inner.dispatch(&reg, &l1, &ui(Some(99)));
+        assert_eq!(relayed_gen(&mut r2), None, "future/stale gen must drop");
+        inner.dispatch(&reg, &l1, &ui(None));
+        assert!(
+            !drain_texts(&mut r2).iter().any(|f| f["type"] == "UI_SYNC"),
+            "untagged frames drop once the member-drive intersection holds"
+        );
+
+        // Close is itself an epoch transition — generation 2 is the closed
+        // casual epoch: pre-close frames causally ignorant of the close are
+        // dead on arrival, while post-close casual traffic tagged 2 relays.
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[
+                    ("state", "active".into()),
+                    ("endBrowse", Value::Bool(true)),
+                ]),
+                "close-1",
+            ),
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+        assert_eq!(
+            inner.session(&sid).unwrap().browse_generation,
+            2,
+            "an open-to-closed transition advances the epoch"
+        );
+        inner.dispatch(&reg, &l1, &ui(Some(1)));
+        assert_eq!(
+            relayed_gen(&mut r2),
+            None,
+            "a pre-close frame must not cross the close boundary"
+        );
+        inner.dispatch(&reg, &l1, &ui(Some(2)));
+        assert_eq!(
+            relayed_gen(&mut r2),
+            Some(2),
+            "casual traffic tagged with the closed epoch relays"
+        );
+
+        // Reopen — generation 3. Both older generations are dead on arrival.
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "selecting".into())]),
+                "open-2",
+            ),
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+        assert_eq!(inner.session(&sid).unwrap().browse_generation, 3);
+
+        inner.dispatch(&reg, &l1, &ui(Some(1)));
+        assert_eq!(
+            relayed_gen(&mut r2),
+            None,
+            "a frame causally bound to the dead generation must not cross the boundary"
+        );
+        inner.dispatch(&reg, &l1, &ui(Some(2)));
+        assert_eq!(
+            relayed_gen(&mut r2),
+            None,
+            "the closed-epoch tag dies when the browse reopens"
+        );
+        inner.dispatch(&reg, &l1, &ui(Some(3)));
+        assert_eq!(relayed_gen(&mut r2), Some(3));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_auto_rejects_while_deliberate_load_in_flight() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner,
+            &reg,
+            &l1,
+            &mut r1,
+            &l2,
+            &mut r2,
+            &[CAP_MEMBER_DRIVE],
+            &[CAP_MEMBER_DRIVE],
+        );
+        let page = protocol::frame(&[
+            ("folder", "work".into()),
+            ("name", "p001.png".into()),
+        ]);
+        let manual = protocol::frame(&[
+            ("folder", "work".into()),
+            ("page", page.clone()),
+        ]);
+        inner.dispatch(&reg, &l1, &req_named("OPEN_WORK", &sid, manual, "manual-open"));
+        assert_eq!(
+            inner.session(&sid).unwrap().pending_load.as_ref().map(|j| j.request_id.as_str()),
+            Some("manual-open")
+        );
+        let auto = protocol::frame(&[
+            ("folder", "work".into()),
+            ("page", page),
+            ("auto", Value::Bool(true)),
+        ]);
+        inner.dispatch(&reg, &l1, &req_named("OPEN_WORK", &sid, auto, "auto-open"));
+        let frames: Vec<Value> = std::iter::from_fn(|| match r1.try_recv() {
+            Ok(OutItem::Text(s)) => serde_json::from_str(&s).ok(),
+            _ => None,
+        })
+        .collect();
+        assert!(frames.iter().any(|f| {
+            f["type"] == "REJECT"
+                && f["requestId"] == "auto-open"
+                && f["reason"] == state::REASON_STALE_REQUEST
+        }));
+        // The deliberate load remains the live generation.
+        assert_eq!(
+            inner.session(&sid).unwrap().pending_load.as_ref().map(|j| j.request_id.as_str()),
+            Some("manual-open")
+        );
     }
 
     #[tokio::test]

@@ -19,11 +19,23 @@ function fakeTransport() {
   };
 }
 
-function makeClient(t) {
+function makeClient(t, onEvent) {
   return globalThis.PairClient.createClient({
     url: 'ws://test/ws/reader-sync',
     transportFactory: () => t,
     storage: null,
+    persistStorage: null,
+    events: null,
+    onEvent: onEvent || null,
+    features: [globalThis.PairClient.CAP_MEMBER_DRIVE],
+  });
+}
+
+function makeBareClient(t, storage) {
+  return globalThis.PairClient.createClient({
+    url: 'ws://test/ws/reader-sync',
+    transportFactory: () => t,
+    storage: storage || null,
     persistStorage: null,
     events: null,
   });
@@ -47,7 +59,11 @@ describe('pairClient guest access', () => {
     helloThen(t);
     const join = t.sent.find((f) => f.type === 'JOIN');
     expect(join).toBeTruthy();
-    expect(join.payload).toEqual({ guestToken: TOKEN });
+    expect(join.payload).toEqual({
+      guestToken: TOKEN,
+      // ADR 0004 capability advertisement rides every admission payload.
+      features: ['member-drive-v1'],
+    });
     expect(join.sessionId).toBeNull();
     const ack = {
       v: 1, type: 'ACK', request: 'JOIN', requestId: join.requestId,
@@ -62,6 +78,89 @@ describe('pairClient guest access', () => {
     expect(d.role).toBe('follower');
     expect(client.state.role).toBe('follower');
     expect(client.state.sessionId).toBe('s1');
+  });
+
+
+  it('does not advertise member-drive unless the composition opts in', async () => {
+    const bare = globalThis.PairClient.createClient({
+      url: 'ws://test/ws/reader-sync',
+      transportFactory: () => t,
+      storage: null,
+      persistStorage: null,
+      events: null,
+    });
+    const p = bare.joinGuest(TOKEN);
+    helloThen(t);
+    const join = t.sent.find((f) => f.type === 'JOIN');
+    expect(join).toBeTruthy();
+    expect(join.payload).toEqual({guestToken: TOKEN});
+    t.emit({
+      v: 1, type: 'ACK', request: 'JOIN', requestId: join.requestId,
+      data: {sessionId: 's0', memberId: 'm0', role: 'follower'},
+    });
+    await p;
+    bare.destroy();
+  });
+
+  it('does not advertise member-drive on CREATE/JOIN/MATCH/RESUME without composition opt-in', async () => {
+    const creds = {
+      sessionId: 's-resume', memberId: 'm-resume', role: 'leader',
+      resumeToken: 'rt-resume',
+    };
+    const cases = [
+      {
+        name: 'CREATE',
+        start: (c) => c.create(),
+        payload: {},
+      },
+      {
+        name: 'JOIN',
+        start: (c) => c.join('123456'),
+        payload: {code: '123456'},
+      },
+      {
+        name: 'MATCH',
+        start: (c) => c.match(),
+        payload: {},
+      },
+      {
+        name: 'MATCH pick',
+        start: (c) => c.match('candidate-token'),
+        payload: {pick: 'candidate-token'},
+      },
+      {
+        name: 'RESUME',
+        start: (c) => c.resume(),
+        payload: {memberId: 'm-resume', resumeToken: 'rt-resume'},
+        storage: {
+          getItem: (k) => k === 'bookq.readerSync.v1'
+            ? JSON.stringify(creds) : null,
+          setItem() {}, removeItem() {},
+        },
+      },
+    ];
+
+    for (const tc of cases) {
+      const transport = fakeTransport();
+      const bare = makeBareClient(transport, tc.storage);
+      const p = tc.start(bare);
+      helloThen(transport);
+      const frame = transport.sent.find((f) => f.type === tc.name.split(' ')[0]);
+      expect(frame, tc.name).toBeTruthy();
+      expect(frame.payload, tc.name).toEqual(tc.payload);
+      expect(Object.prototype.hasOwnProperty.call(frame.payload, 'features'),
+        tc.name).toBe(false);
+      transport.emit({
+        v: 1, type: 'ACK', request: frame.type, requestId: frame.requestId,
+        data: {
+          sessionId: 's-' + tc.name, memberId: 'm-' + tc.name,
+          role: tc.name === 'CREATE' || tc.name === 'RESUME' ? 'leader' : 'follower',
+          trust: 'member', resumeToken: 'rt-new',
+        },
+      });
+      await p;
+      bare.destroy();
+    }
   });
 
   it('joinGuest rejects malformed tokens without opening a link', async () => {
@@ -286,5 +385,233 @@ describe('guestToken storage hygiene', () => {
     await p;
     expect(c.state.code).toBe('123456');      // code-only QR restorable
     expect(c.state.guestToken).toBeNull();    // grant stays with dead tab
+  });
+});
+
+describe('pairClient data-channel input authentication', () => {
+  async function bound(role, events) {
+    const t = fakeTransport();
+    const client = makeClient(t, events ? events.push.bind(events) : null);
+    const p = role === 'leader' ? client.create() : client.join('123456');
+    helloThen(t);
+    const entry = t.sent.find((f) => f.type === (role === 'leader' ? 'CREATE' : 'JOIN'));
+    t.emit({
+      v: 1, type: 'ACK', request: entry.type, requestId: entry.requestId,
+      data: {
+        sessionId: 's1', memberId: 'm-' + role, role: role,
+        trust: 'member', resumeToken: 'rt1', features: ['member-drive-v1'],
+      },
+    });
+    await p;
+    return { t, client };
+  }
+
+  function openDc(client) {
+    const dc = fakeTransport();
+    client.attachDataChannel(dc);
+    if (dc.onopen) dc.onopen();
+    return dc;
+  }
+
+  function stateFrame(rev, plane) {
+    return {
+      v: 1, type: 'STATE', sessionId: 's1', revision: rev, workEpoch: 0,
+      manifestVersion: 0, phase: 'selecting', spreadId: null, offset: 0,
+      leaderSide: 'left', dataPlane: plane || 'server-ws',
+      features: ['member-drive-v1'], presence: {},
+    };
+  }
+
+  function forgedBatch(dc) {
+    dc.emit({ v: 1, type: 'UI_SYNC', sessionId: 's1', from: 'follower',
+              payload: {view: 'browse', top: 1, viewH: 100} });
+    dc.emit(Object.assign(stateFrame(99), {sessionId: 's1'}));
+    dc.emit({ v: 1, type: 'END', sessionId: 's1', reason: 'left' });
+  }
+
+  it('leader never dispatches forged server frames from the DC, in either plane', async () => {
+    const events = [];
+    const { t, client } = await bound('leader', events);
+    const dc = openDc(client);
+    t.emit(stateFrame(1, 'webrtc-dc'));
+    expect(client.state.transport).toBe('webrtc-dc');
+
+    // A forged TRANSPORT_STATE downgrade must not re-open the injection path.
+    dc.emit({ v: 1, type: 'TRANSPORT_STATE', sessionId: 's1',
+              dataPlane: 'server-ws', revision: 2 });
+    expect(client.state.transport).toBe('webrtc-dc');
+
+    // And once the genuine server WS did downgrade the plane, the same forged
+    // server-originated frames remain inert (the regression window this closes).
+    t.emit({ v: 1, type: 'TRANSPORT_STATE', sessionId: 's1',
+             dataPlane: 'server-ws', revision: 2 });
+    expect(client.state.transport).toBe('server-ws');
+    forgedBatch(dc);
+    expect(client.state.revision).toBe(1);
+    expect(client.state.endReason).toBeNull();
+    expect(events.some((e) => e.type === 'ui-sync')).toBe(false);
+    client.destroy();
+  });
+
+  it('leader relays only whitelisted sequenced requests from DC regardless of plane', async () => {
+    const { t, client } = await bound('leader');
+    const dc = openDc(client);
+    expect(client.state.transport).toBe('server-ws');
+    const before = t.sent.length;
+    dc.emit({
+      v: 1, requestId: 'dc-open', sessionId: 's1', workEpoch: 0,
+      baseRevision: 0, type: 'OPEN_WORK',
+      payload: {folder: 'w', page: {folder: 'w', name: 'p.png'}},
+    });
+    dc.emit({
+      v: 1, requestId: 'dc-control', sessionId: 's1', workEpoch: 0,
+      baseRevision: 0, type: 'SET_ACTIVITY', payload: {state: 'active'},
+    });
+    const relayed = t.sent.slice(before).find((f) => f.requestId === 'dc-open');
+    expect(relayed).toBeTruthy();
+    expect(relayed.payload.origin).toBe('follower');
+    expect(t.sent.slice(before).some((f) => f.requestId === 'dc-control')).toBe(false);
+    client.destroy();
+  });
+
+  it('follower drops every inbound DC frame, including plausible server frames', async () => {
+    const events = [];
+    const { t, client } = await bound('follower', events);
+    const dc = openDc(client);
+    t.emit(stateFrame(1, 'webrtc-dc'));
+    expect(client.state.transport).toBe('webrtc-dc');
+    const before = t.sent.length;
+    forgedBatch(dc);
+    dc.emit({
+      v: 1, requestId: 'dc-open', sessionId: 's1', workEpoch: 0,
+      baseRevision: 0, type: 'OPEN_WORK',
+      payload: {folder: 'w', page: {folder: 'w', name: 'p.png'}},
+    });
+    dc.emit({ v: 1, type: 'TRANSPORT_STATE', sessionId: 's1',
+              dataPlane: 'server-ws', revision: 2 });
+    expect(client.state.revision).toBe(1);
+    expect(client.state.transport).toBe('webrtc-dc');
+    expect(client.state.endReason).toBeNull();
+    expect(events.some((e) => e.type === 'ui-sync')).toBe(false);
+    expect(t.sent.slice(before).some((f) => f.requestId === 'dc-open')).toBe(false);
+    client.destroy();
+  });
+});
+
+describe('pairClient member-drive capability gate', () => {
+  function boundFollower(trust) {
+    const t = fakeTransport();
+    const client = makeClient(t);
+    const p = client.join('123456');
+    helloThen(t);
+    const join = t.sent.find((f) => f.type === 'JOIN');
+    t.emit({
+      v: 1, type: 'ACK', request: 'JOIN', requestId: join.requestId,
+      data: {
+        sessionId: 's1', memberId: 'm-follower', role: 'follower',
+        trust: trust, resumeToken: 'rt1', features: ['member-drive-v1'],
+      },
+    });
+    return { t, client, p };
+  }
+
+  function stateWith(peerFeatures) {
+    return {
+      v: 1, type: 'STATE', sessionId: 's1', revision: 2, workEpoch: 0,
+      manifestVersion: 0, phase: 'selecting', spreadId: null, offset: 0,
+      leaderSide: 'left', dataPlane: 'server-ws', features: ['member-drive-v1'],
+      presence: {
+        'm-leader': {
+          role: 'leader', status: 'active', trust: 'member', ready: false,
+          features: peerFeatures,
+        },
+        'm-follower': {
+          role: 'follower', status: 'active', trust: 'member', ready: false,
+          features: ['member-drive-v1'],
+        },
+      },
+    };
+  }
+
+  it('member follower may OPEN_WORK only when the capability intersection exists', async () => {
+    const { t, client, p } = boundFollower('member');
+    await p;
+    const intent = {
+      type: 'openWork', folder: 'work',
+      page: { folder: 'work', name: 'p001.png' },
+    };
+    expect(client.sendIntent(intent)).toBe(false);   // no STATE yet
+    t.emit(stateWith(['member-drive-v1']));
+    expect(client.state.memberDrive).toBe(true);
+    expect(client.state.canDrive).toBe(true);
+    expect(client.sendIntent(intent)).toBe(true);
+    const open = t.sent.find((f) => f.type === 'OPEN_WORK');
+    expect(open).toBeTruthy();
+    const downgraded = stateWith([]);
+    downgraded.revision = 3;
+    t.emit(downgraded);
+    expect(client.state.memberDrive).toBe(false);
+    expect(client.sendIntent(intent)).toBe(false);
+    client.destroy();
+  });
+
+
+  it('a REJECT snapshot without presence/features fails closed instead of reusing STATE', async () => {
+    const { t, client, p } = boundFollower('member');
+    await p;
+    t.emit(stateWith(['member-drive-v1']));
+    expect(client.state.memberDrive).toBe(true);
+    t.emit({
+      v: 1, type: 'REJECT', requestId: 'x1', request: 'TURN',
+      reason: 'stale_revision', sessionId: 's1',
+      snapshot: {
+        sessionId: 's1', revision: 3, workEpoch: 0, manifestVersion: 0,
+        phase: 'selecting', spreadId: null, offset: 0,
+        leaderSide: 'left', dataPlane: 'server-ws',
+      },
+    });
+    expect(client.state.revision).toBe(3);
+    expect(client.state.memberDrive).toBe(false);
+    expect(client.state.canDrive).toBe(false);
+    client.destroy();
+  });
+
+  it('public canDrive is legacy-leader or member-drive, never guest', async () => {
+    const t = fakeTransport();
+    const client = makeClient(t);
+    const p = client.create();
+    helloThen(t);
+    const create = t.sent.find((f) => f.type === 'CREATE');
+    t.emit({
+      v: 1, type: 'ACK', request: 'CREATE', requestId: create.requestId,
+      data: {
+        sessionId: 's1', memberId: 'm-leader', role: 'leader',
+        trust: 'member', resumeToken: 'rt1', features: ['member-drive-v1'],
+      },
+    });
+    await p;
+    const legacy = stateWith([]);
+    legacy.presence['m-follower'].features = [];
+    t.emit(legacy);
+    // The legacy leader remains a driver even with no capability intersection;
+    // mode-specific consumers use memberDrive to tell which rule supplied it.
+    expect(client.state.memberDrive).toBe(false);
+    expect(client.state.canDrive).toBe(true);
+    client.destroy();
+  });
+
+  it('guest trust cannot drive even when both runtimes advertise the feature', async () => {
+    const { t, client, p } = boundFollower('guest');
+    await p;
+    const st = stateWith(['member-drive-v1']);
+    st.presence['m-follower'].trust = 'guest';
+    t.emit(st);
+    expect(client.state.memberDrive).toBe(true);
+    expect(client.state.canDrive).toBe(false);
+    expect(client.sendIntent({
+      type: 'openWork', folder: 'work',
+      page: { folder: 'work', name: 'p001.png' },
+    })).toBe(false);
+    client.destroy();
   });
 });

@@ -47,7 +47,7 @@ def _json_response(expr: str, status: int = 200) -> str:
     )
 
 
-def _boot(page, fetch_impl: str, storage_seed: dict | None = None):
+def _boot(page, fetch_impl: str, storage_seed: dict | None = None, pre_eval: str | None = None):
     page.route(
         "**/*",
         lambda route: route.fulfill(
@@ -67,6 +67,8 @@ def _boot(page, fetch_impl: str, storage_seed: dict | None = None):
     # only seam (calls still record {u,o} on window.__calls).
     page.evaluate(ENDPOINTS_SRC)
     page.evaluate(API_SRC)
+    if pre_eval:
+        page.evaluate(pre_eval)
     page.evaluate(VIS_SRC)
 
 
@@ -720,3 +722,36 @@ def test_stale_put_response_not_adopted_converges_once(vpage):
         "window.FolderVisibility.snapshot().revision === 4")
     snap = vpage.evaluate("window.FolderVisibility.snapshot()")
     assert sorted(snap["hiddenRoots"]) == ["hide_me", "keep_a"]
+
+
+def test_guest_show_all_entry_gesture_is_never_bound(vpage):
+    """ADR 0004 regression: hidden roots are UI convenience, not access
+    control, but the guest surface must not even bind the member-only
+    show-all trigger. The second layer (setShowAll clamps guests) is not a
+    substitute for the no-binding invariant."""
+    _boot(
+        vpage,
+        _json_response("{owner:'ownA',revision:1,hiddenRoots:['secret']}"),
+        pre_eval="window.BookqGuest={isGuest:function(){return true;}}",
+    )
+    vpage.evaluate(
+        "document.body.insertAdjacentHTML('beforeend',"
+        "'<div id=\"browse-header\"><span id=\"browse-root-icon\">📁</span></div>')"
+    )
+    _init(vpage)
+    assert vpage.evaluate("window.FolderVisibility.showAll") is False
+    assert vpage.evaluate("!!document.getElementById('browse-header').__fvGesture") is False
+    # Even a perfect right-edge swipe must be inert on the guest surface.
+    vpage.evaluate(
+        """(() => {
+          const icon = document.getElementById('browse-root-icon');
+          const opts = (type,x) => new PointerEvent(type, {
+            pointerId: 7, clientX: x, clientY: 8, bubbles: true, cancelable: true,
+          });
+          icon.dispatchEvent(opts('pointerdown', 10));
+          document.dispatchEvent(opts('pointermove', window.innerWidth - 2));
+          document.dispatchEvent(opts('pointerup', window.innerWidth - 2));
+        })()"""
+    )
+    assert vpage.evaluate("window.FolderVisibility.showAll") is False
+    assert vpage.evaluate("document.body.classList.contains('fv-showall')") is False

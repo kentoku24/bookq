@@ -3,9 +3,12 @@
  * （実行時はすべて window.* 経由の遅延解決なので、DOMContentLoaded で init する）。
  *
  * 何をするか:
- *   leader がブラウズ一覧（#sidebar-scroll / #tile-grid）を開くと pair の phase が
- *   'selecting' になる（pairController の sidebar observer → SET_ACTIVITY）。
- *   armed = live pair && phase==='selecting' の間、自分の {path, scrollTop,
+ *   tile browsing は常に共有される（プロダクト判断 — 初回 picking も
+ *   作品を閉じた後の物色も同じ行為）。armed = live pair の全期間で、
+ *   phase や commit 状態に依らない。arming は送信権ではなく受信資格:
+ *   送信は send gate（local sidebar 開 + unlock + query sort 非活性）を
+ *   通る frame だけなので、閲覧中に送信で邪魔されることはない。
+ *   自分の {path, scrollTop,
  *   clientHeight, scrollHeight, viewMode} を ephemeral frame UI_SYNC で
  *   peer へ中継する。受信側は不変式「peer のスクロール進捗 = 自分の
  *   スクロール進捗」で scrollTop を導く（双方向とも同じ式）:
@@ -46,8 +49,10 @@
  *   seq は持たない。
  *
  *   follower のミラー sidebar は最初の有効 frame で自動的に開き、disarm
- *   （phase 離脱 / session 終了）で自分が開いた分だけ畳む。armed 中に
- *   ユーザーが閉じた場合はその arm 期間中は開き直さない（_userClosed）。
+ *   （session 終了 / pair 切断）で自分が開いた分だけ畳む。armed 中に
+ *   ユーザーが明示的に閉じた場合はその arm 期間中は開き直さない
+ *   （_userClosed — closeSidebar の intent marker で区別し、
+ *   プログラム close は suppression しない）。
  *
  *   echo/逆変換の保護:
  *   - remote 適用直後 SUPPRESS_MS 間は scroll send を窓明けへ defer する
@@ -75,7 +80,7 @@
   var EST_MAX_MS = 200;
   var LOCAL_SETTLE_MS = 400;
 
-  var _armed = false;        // ミラー有効（live pair && phase==='selecting'）
+  var _armed = false;        // ミラー有効（live pair && browse 対象フェーズ）
   var _unlocked = false;     // 送信解禁 — leader は arm 即時、follower は初適用後
   var _lastSendTs = -1e9;
   var _lastSentSig = null;
@@ -96,6 +101,9 @@
   var _pointerActive = false;
   var _lastLocalMove = -1e9;
   var _lastLocalIntent = -1e9;
+  var _browseOpenerId = null; // server-serialized first opener for this generation
+  var _browseGeneration = null; // last consumed positive shared-browse generation
+  var _memberDriveActive = false; // last observed member-drive capability intersection
   var _sndHist = [];
   var _trace = null;
 
@@ -127,6 +135,15 @@
   function _live(st) {
     return !!st && !!st.sessionId && st.status !== 'idle' &&
       st.status !== 'ended' && st.status !== 'error';
+  }
+  function _armEligible(st) {
+    if (!_live(st) || !_paired(st)) return false;
+    // Tile browsing is always shared (product decision, restoring legacy):
+    // the mirror arms for the whole paired lifetime regardless of commit
+    // state or phase. Arming does not open the sidebar or bypass the send
+    // gate — it only makes the client eligible to receive, and to send when
+    // the local sidebar is open, unlocked, and not query-sorted.
+    return true;
   }
   function _presenceSig(st) {
     var p = st && st.presence;
@@ -167,8 +184,99 @@
 
   /* ── arm / disarm ── */
 
+  function _resetGenerationRuntime() {
+    _unlocked = false;
+    _lastSentSig = null;
+    _appliedHold = null;
+    _pendingMsg = null;
+    _userClosed = false;
+    _suppressUntil = 0;
+    _lastRemoteMsg = null;
+    _resetFollow();
+    _releaseInput();
+    _lastLocalMove = -1e9;
+    _lastLocalIntent = -1e9;
+    if (_trailT) { clearTimeout(_trailT); _trailT = null; }
+  }
+
+  function _seedGeneration(st) {
+    // Only the server-serialized opener seeds a member-drive generation.
+    // Every non-opener remains locked until it applies that opener's first
+    // remote frame; inferring initiation from the local DOM can elect both
+    // sides after simultaneous opens and makes an offline close→reopen keep
+    // a stale seed. Legacy pairs have no opener field and remain fixed-role.
+    _browseOpenerId = st.browseOpener || null;
+    // The opener rule is keyed on the explicit shared-browse open: whenever
+    // a member-drive pair has shared browse open, the server serializes an
+    // opener and a generation, and only that opener seeds. Everything else is
+    // casual mirror traffic, with two regimes: member-drive casual picking is
+    // symmetric in initiation (either member shares when it browses — the
+    // product decision) with only the arm-edge auto-seed tie-broken to the
+    // leader, while legacy/mixed pairs keep the fixed legacy role rule.
+    // Keying on the commit boundary instead mis-elected
+    // the leader by role when the follower had explicitly opened: the opener
+    // stayed locked (never seeded) while the role-initiator's sidebar could
+    // be closed (never sends) — a deadlock where no mirror frame ever left
+    // either side and the peer list never opened.
+    var explicitOpen = st.memberDrive === true && st.browse === true;
+    var initiator;
+    var autoSeed;
+    if (explicitOpen) {
+      initiator = _browseOpenerId !== null && _browseOpenerId === st.memberId;
+      autoSeed = initiator;
+    } else if (st.memberDrive === true) {
+      // Casual member-drive picking is symmetric in INITIATION — either
+      // member's own browsing must be able to share (the product decision),
+      // which requires both sides unlocked. Electing only the leader here
+      // deadlocked follower-initiated picking whenever the leader was
+      // inactive: the follower stayed locked, the only unlock path being a
+      // remote frame the inactive leader never emitted. But the arm-edge
+      // AUTO-seed is not symmetric: members can join a pair while viewing
+      // different folders, and if both ends seed before receiving, each
+      // applies the other's folder and the lists never converge — echo
+      // suppression then pins the swapped positions. The deterministic
+      // tie-break is the leader, exactly as legacy pairs elect.
+      initiator = true;
+      autoSeed = st.role === 'leader';
+    } else {
+      // Legacy/mixed pairs keep the fixed-role asymmetry: the leader drives,
+      // the follower watches — including the leader not auto-opening.
+      initiator = st.role === 'leader';
+      autoSeed = initiator;
+    }
+    if (initiator) {
+      _unlocked = true;
+      _lastSentSig = null;
+      if (autoSeed) _requestSend();
+    }
+  }
+
   function _onCtlState(st) {
-    var armed = _live(st) && _paired(st) && st.phase === 'selecting';
+    var rawGen = (st && typeof st.browseGeneration === 'number' &&
+                  isFinite(st.browseGeneration)) ? st.browseGeneration : null;
+    // PairClient normalizes absent wire metadata to 0, so only a positive
+    // value is evidence of a real generation. A legacy/mixed open after an
+    // offline close→reopen can therefore arrive as "generation missing"
+    // even though the server-internal generation advanced.
+    var gen = rawGen !== null && rawGen > 0 ? rawGen : null;
+    var memberDrive = !!(st && st.memberDrive === true);
+    var generationChanged = gen !== null && _browseGeneration !== null &&
+      gen !== _browseGeneration;
+    var generationEmerged = gen !== null && _browseGeneration === null;
+    var generationVanished = gen === null && _browseGeneration !== null;
+    var memberDriveLost = _memberDriveActive === true && !memberDrive;
+    // Numeric changes are not the only close→reopen boundary. If this
+    // client consumed member-drive generation metadata and a later open
+    // state loses that encoding (or the capability intersection itself),
+    // legacy fallback cannot inherit the old opener/unlock/seed state.
+    // Generation appearance while continuously armed is also a mode
+    // boundary (a legacy-open generation becoming visible after upgrade).
+    var generationBoundary = generationChanged || generationVanished ||
+      memberDriveLost || (_armed && generationEmerged);
+    if (gen !== null) _browseGeneration = gen;
+    else if (generationVanished) _browseGeneration = null;
+    _memberDriveActive = memberDrive;
+    var armed = _armEligible(st);
     if (armed && !_armed) {
       _armed = true;
       _prevPresenceSig = _presenceSig(st);
@@ -177,14 +285,18 @@
       // 永久に開かない。TTL 切れの stash は捨てる。
       var pm = _takePending();
       if (pm) _applyRemote(pm.msg, pm.at);
-      // leader は開いている側 — すぐ共有を始める。follower は remote を待つ
-      // （まだ stale 位置を送ると leader を巻き込む）。
-      if (st.role === 'leader') {
-        _unlocked = true;
-        _lastSentSig = null;
-        _requestSend();
-      }
+      _seedGeneration(st);
       return;
+    }
+    if (armed && _armed && generationBoundary) {
+      // A close→reopen that happened while this link was offline never
+      // produces a disarm/arm pair: both states are open. The generation —
+      // including its disappearance under legacy fallback — is therefore the
+      // only trustworthy boundary. Drop every seed/unlock and pending
+      // position inherited from the old generation before electing the seed
+      // rule that applies to the current mode.
+      _resetGenerationRuntime();
+      _seedGeneration(st);
     }
     if (!armed && _armed) {
       _armed = false;
@@ -199,6 +311,9 @@
       _releaseInput();
       _lastLocalMove = -1e9;
       _lastLocalIntent = -1e9;
+      _browseOpenerId = null;
+      _browseGeneration = null;
+      _memberDriveActive = false;
       if (_trailT) { clearTimeout(_trailT); _trailT = null; }
       // 自分が開いたミラー用サイドバーだけ畳む — role を見ると 'ended' で
       // null 化した後に leader の手動 sidebar まで畳んでしまう。
@@ -226,7 +341,38 @@
   }
 
   function _onCtlEvent(e) {
-    if (e && e.type === 'ui-sync') _applyRemote(e.payload);
+    if (!(e && e.type === 'ui-sync')) return;
+    var msg = e.payload;
+    // Generation-tagged frames are causally bound to the browse generation
+    // the sender observed. Across a close→reopen boundary they are stale
+    // echoes of the old generation — never the new opener's first seed —
+    // so they must not apply or unlock. The server drops what it can, but
+    // a frame relayed just before the boundary can still arrive after the
+    // new-generation STATE; only this receiver-side check closes that race.
+    if (_foreignGeneration(msg)) return;
+    _applyRemote(msg);
+  }
+
+  /* Tagged generation of an inbound mirror frame, or null when the frame is
+   * untagged (legacy/mixed peer) or the tag is malformed. */
+  function _msgGeneration(msg) {
+    return (msg && typeof msg.browseGeneration === 'number' &&
+            isFinite(msg.browseGeneration) && msg.browseGeneration > 0)
+      ? msg.browseGeneration : null;
+  }
+
+  /* A verifiably-tagged frame whose generation is not the one this client
+   * currently observes belongs to a dead generation: it must neither apply
+   * nor unlock. Untagged frames pass only while the pair genuinely cannot
+   * tag: once this client observes both the member-drive intersection and a
+   * live generation, every peer is running a build that tags, so an untagged
+   * frame can only be a pre-upgrade straggler — the exact in-flight
+   * pollution the generation exists to prevent. Pre-commit picking mirrors
+   * have no generation at all (_browseGeneration stays null) and pass. */
+  function _foreignGeneration(msg) {
+    var gen = _msgGeneration(msg);
+    if (gen !== null) return gen !== _browseGeneration;
+    return _memberDriveActive === true && _browseGeneration !== null;
   }
 
   /* ── 送信 ── */
@@ -238,7 +384,7 @@
 
   function _payload() {
     var sc = _scroller();
-    return {
+    var p = {
       view: 'browse',
       path: _w().currentBrowsePath || null,
       top: sc.scrollTop,
@@ -246,6 +392,13 @@
       scrollH: _canRatio() ? sc.scrollHeight : undefined,
       mode: _w().viewMode || 'tile',
     };
+    // Member-drive generations tag their mirror traffic so the server and
+    // the receiver can drop frames that cross a close→reopen boundary —
+    // without the tag an in-flight echo of the old generation is
+    // indistinguishable from the new opener's first seed. Legacy mode has
+    // no generations, so nothing is tagged there.
+    if (_browseGeneration !== null) p.browseGeneration = _browseGeneration;
+    return p;
   }
 
   function _sigOf(p) {
@@ -576,7 +729,7 @@
     var c = _followCtx;
     var st = _pc() && _pc().state;
     return !!(f.sc && c && f.sc === _scroller() && _armed && st &&
-      st.phase === 'selecting' && st.sessionId === c.sid &&
+      _armEligible(st) && st.sessionId === c.sid &&
       _role() === c.role && !_queryActive() &&
       !document.hidden && _sidebarOpen() && !_reducedMotion() &&
       (_w().viewMode || 'tile') === c.mode &&
@@ -640,7 +793,21 @@
   }
 
   function _ensureSidebarOpen() {
-    if (_userClosed || _role() === 'leader' || _sidebarOpen()) return;
+    var st = _pc() && _pc().state;
+    var fixedRoles = !(st && st.memberDrive === true);
+    if (_userClosed || (fixedRoles && _role() === 'leader') ||
+        _sidebarOpen()) return;
+    // A mirror-initiated open is not a user open: mark it so pairController
+    // does not turn passive receipt into a control-plane SET_ACTIVITY open.
+    // Ephemeral frame receipt must never foreground the shared-selection
+    // activity by itself — the user joining the tiles is what does that.
+    var token = {programmatic: true, at: Date.now()};
+    window.__bookqSidebarOpenIntent = token;
+    setTimeout(function () {
+      if (window.__bookqSidebarOpenIntent === token) {
+        delete window.__bookqSidebarOpenIntent;
+      }
+    }, 0);
     try {
       // 正規の open 経路（app.js toggleSidebar と同じ visual open）を共有 —
       // 手書き class 付与だと tile-full 等のレイアウトが欠けて scrollHeight
@@ -669,6 +836,11 @@
 
   function _applyRemote(msg, at) {
     if (!msg || msg.view !== 'browse') return;
+    // Revalidate at the point of effect: deferred consumption (stash retry,
+    // grid mutation, arm-edge) bypasses the receipt-time check, and a frame
+    // honestly tagged for generation N must not apply after the boundary to
+    // N+1 — regardless of which paths do or do not clear the stash.
+    if (_foreignGeneration(msg)) return;
     // 通常モードで非表示 root 配下への remote path は拒否 — pending に
     // stash しない（禁止対象を再適用可能にしない）し currentBrowsePath にも
     // 代入しない。同期を解除してトップへ戻す。表示設定やモードは
@@ -746,7 +918,7 @@
                       top: msg.top, viewH: msg.viewH, scrollH: msg.scrollH};
     // 未解禁 follower の初回 frame はローカル操作中でも適用する — 捨てると
     // _unlocked が立たず、leader が動くまで自分の操作も共有されない。
-    var firstApply = _role() === 'follower' && !_unlocked;
+    var firstApply = !_unlocked;
     if (navNeeded || modeNeeded) {
       _applyImmediate(sc, target, ctx);
     } else if (!firstApply && ctx.mode === 'tile' && _sidebarOpen() &&
@@ -762,7 +934,7 @@
       _suppressUntil = Date.now() + SUPPRESS_MS;
       _followSample(target, predT);
     }
-    if (_role() === 'follower' && !_unlocked) _unlocked = true;
+    if (!_unlocked) _unlocked = true;
   }
 
   /* tile-grid の childList 変化 = renderView 系の全再描画（潜り/戻る/
@@ -880,10 +1052,14 @@
       }
       var sb = _sidebar();
       if (sb) {
-        // armed 中にミラー sidebar が閉じられた = ユーザーが自分で閉じた
-        // （このモジュールが閉じるのは disarm のみで、その時点では
-        // _armed=false）。次の受信 frame で開き直すとちらつくので、その
-        // arm 期間中は開き直さない。
+        // armed 中にミラー sidebar が「ユーザー操作で」閉じられた場合のみ
+        // 開き直さない — closeSidebar の intent marker で区別する。
+        // プログラム close（work commit・wire browse close・reader 復帰）は
+        // ユーザー意思ではない: arm が pair lifetime になった今、それを
+        // user close と誤記憶すると以後の casual mirror frame が永遠に
+        // auto-open しなくなる。open 遷移は常に suppression を解く。
+        // marker は closeSidebar が microtask 前にセットし macrotask で
+        // 消すため、MutationObserver(microtask) では必ず読める。
         var wasOpen = sb.classList.contains('open');
         try {
           new MutationObserver(function () {
@@ -891,11 +1067,18 @@
             if (open === wasOpen) return;
             wasOpen = open;
             if (!_armed) return;
-            _userClosed = !open;
-            if (!open) {
-              _resetFollow();
-              _releaseInput();
+            if (open) {
+              _userClosed = false;
+              return;
             }
+            var intent = window.__bookqSidebarCloseIntent;
+            _userClosed = !!(intent && intent.explicit);
+            // mirror が開いた sidebar が何らかの close で閉じられた時点で
+            // ownership は消費済み — 後でユーザーが手動で開き直しても
+            // disarm 時にモジュールが閉じてはいけない。
+            _mirrorOpened = false;
+            _resetFollow();
+            _releaseInput();
           }).observe(sb, {attributes: true, attributeFilter: ['class']});
         } catch (e) { console.warn(e); }
       }
@@ -914,7 +1097,13 @@
       // 機能チェーンが揃っているか」を見る。旧 pairController には onEvent が
       // 無いので、その混在では flag は立たず watchdog が修復に入る。
       // _onCtlState より先に立てる — 中の例外でマーカー未設定誤診を防ぐ。
-      try { window.BOOKQ_BROWSE_SYNC = true; } catch (e) {}
+      try {
+        window.BOOKQ_BROWSE_SYNC = true;
+        // Versioned composition marker: generation/member-drive aware
+        // browse sync. The capability advertiser and shell watchdog key on
+        // this value; the boolean above remains the pre-generation marker.
+        window.BOOKQ_BROWSE_SYNC_API = 2;
+      } catch (e) {}
     }
     // subscribe は即時通知しない — 起動時点の状態で arm 判定する
     // （ペア中のリロードが selecting の途中で戻るケース）。
@@ -968,7 +1157,23 @@
         _lastSendTs = -1e9;
         _sendNow();
       },
+      /* Unit tests drive several independent state machines through this
+       * singleton. Reset runtime state without touching the DOM or the
+       * subscriptions installed at module init. */
+      reset: function () {
+        _armed = false;
+        _resetGenerationRuntime();
+        _browseOpenerId = null;
+        _browseGeneration = null;
+        _memberDriveActive = false;
+        _prevPresenceSig = '';
+        _mirrorOpened = false;
+        _lastSendTs = -1e9;
+        _sndHist = [];
+        if (_trace) _trace.length = 0;
+      },
       applyRemote: _applyRemote,
+      ctlEvent: _onCtlEvent,
       onState: _onCtlState,
     };
   }

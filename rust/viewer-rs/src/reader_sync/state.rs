@@ -118,7 +118,7 @@ pub fn derive_phase(session: &PairSession, links: &HashMap<String, Link>) -> &'s
     if session.pending_load.is_some() {
         return "loading";
     }
-    if session.selecting || session.manifest.is_none() {
+    if session.browse_open || session.manifest.is_none() {
         return "selecting";
     }
     if !all_ready(session) {
@@ -128,7 +128,12 @@ pub fn derive_phase(session: &PairSession, links: &HashMap<String, Link>) -> &'s
 }
 
 /// The committed snapshot — embedded verbatim in REJECT frames.
-pub fn snapshot(session: &PairSession, links: &HashMap<String, Link>) -> Value {
+pub fn snapshot(
+    session: &PairSession,
+    links: &HashMap<String, Link>,
+    browse_visible: bool,
+    server_features: Value,
+) -> Value {
     let mut m = Map::new();
     m.insert("sessionId".into(), Value::String(session.id.clone()));
     m.insert("revision".into(), Value::from(session.revision));
@@ -158,6 +163,61 @@ pub fn snapshot(session: &PairSession, links: &HashMap<String, Link>) -> Value {
         "dataPlane".into(),
         Value::String(session.data_plane.clone()),
     );
+    let mut presence = Map::new();
+    for member in &session.members {
+        let mut p = Map::new();
+        p.insert("role".into(), Value::String(member.role.clone()));
+        p.insert("status".into(), Value::String(member.status.clone()));
+        p.insert("trust".into(), Value::String(member.trust.clone()));
+        p.insert(
+            "features".into(),
+            Value::Array(
+                member
+                    .capabilities
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+        p.insert("name".into(), Value::String(member.name.clone()));
+        p.insert("ready".into(), Value::Bool(session.ready.contains(&member.id)));
+        presence.insert(member.id.clone(), Value::Object(p));
+    }
+    m.insert("presence".into(), Value::Object(presence));
+    m.insert("features".into(), server_features);
+    if browse_visible && session.browse_open {
+        // Shared browse is orthogonal to the derived phase (paused masks it),
+        // so new-capability clients receive the authoritative boolean. Open
+        // frames keep the legacy-compatible true-only encoding; opener and
+        // generation metadata are additive next to that boolean.
+        m.insert("browse".into(), Value::Bool(true));
+        m.insert(
+            "browseGeneration".into(),
+            Value::from(session.browse_generation),
+        );
+        if let Some(opener) = &session.browse_opener_id {
+            m.insert("browseOpener".into(), Value::String(opener.clone()));
+            if let Some(role) = session
+                .members
+                .iter()
+                .find(|member| &member.id == opener)
+                .map(|member| member.role.clone())
+            {
+                m.insert("browseOpenerRole".into(), Value::String(role));
+            }
+        }
+    } else if !session.browse_open && session.browse_generation > 0 {
+        // Rejection snapshots are complete state snapshots, so they use the
+        // same close encoding as STATE. Keeping the additive false/generation
+        // here prevents capability close rights from flapping when a client
+        // adopts a snapshot after a downgrade close.
+        m.insert("browse".into(), Value::Bool(false));
+        m.insert(
+            "browseGeneration".into(),
+            Value::from(session.browse_generation),
+        );
+    }
     Value::Object(m)
 }
 

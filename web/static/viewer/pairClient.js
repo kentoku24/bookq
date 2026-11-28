@@ -46,6 +46,10 @@
   'use strict';
 
   var PROTOCOL_VERSION = 1;
+  /* Phase-1 capability advertisement (ADR 0004). Feature strings are
+   * additive within wire v1; absence on either member means the server and
+   * this client must both preserve the legacy leader-only browse model. */
+  var CAP_MEMBER_DRIVE = 'member-drive-v1';
   var DEFAULT_PATH = '/ws/reader-sync';
   var STORAGE_KEY = 'bookq.readerSync.v1';
   /* Cross-tab persist record (localStorage): lets a member rejoin after its
@@ -104,6 +108,10 @@
   var RESUME_REJECT_END = {
     resume_expired: 'resume_expired',
     bad_resume: 'session_lost',
+    // The credential is valid but belongs to the other authentication class
+    // (guest bearer vs member login). Retrying on this same link can never
+    // succeed, so this is terminal exactly like a lost session.
+    trust_mismatch: 'session_lost',
     resume_in_use: null,
   };
   // END.reason -> endReason ('shutdown' means the server went away — the
@@ -347,6 +355,17 @@
     // four missed PINGs + slack; the check reads _lastRx at fire time.
     var _livenessMs = opts.livenessTimeoutMs || 20000;
     var _webrtc = opts.webrtc || null;   // {pcFactory?} — enables the DC upgrade
+    // Capability advertisement is composition opt-in: a low-level client
+    // must not claim member-drive when the shell composed around it is an
+    // older controller that cannot emit the mode's explicit close semantics.
+    var _features = [];
+    if (Array.isArray(opts.features)) {
+      opts.features.forEach(function (f) {
+        if (typeof f === 'string' && f && _features.indexOf(f) < 0) {
+          _features.push(f);
+        }
+      });
+    }
 
     /* ── state ── */
     var _member = null;              // bound member {sessionId,memberId,role,resumeToken}
@@ -462,11 +481,57 @@
       }, _livenessMs + 1);             // +1: fire strictly past the deadline
     }
 
+    function _presenceEntry(memberId) {
+      var p = _lastState && _lastState.presence;
+      return p && memberId ? p[memberId] || null : null;
+    }
+
+    function _hasCap(obj) {
+      return !!(obj && Array.isArray(obj.features) &&
+                obj.features.indexOf(CAP_MEMBER_DRIVE) !== -1);
+    }
+
+    /* Pair-level capability intersection. The server reflects each member's
+     * last advertised runtime features in STATE.presence and its own feature
+     * set at STATE.features. Empty/absent arrays mean a legacy client. */
+    function _memberDrive() {
+      if (!_lastState || !_hasCap(_lastState)) return false;
+      var p = _lastState.presence || {};
+      var ids = Object.keys(p);
+      return ids.length >= 2 && ids.every(function (id) { return _hasCap(p[id]); });
+    }
+
+    function _ownTrust() {
+      var own = _presenceEntry(_member && _member.memberId);
+      var t = (own && own.trust) || (_member && _member.trust);
+      if (t) return t;
+      // A server that never emits trust predates the guest feature itself:
+      // every member in such a deployment is a full member. Trust-aware
+      // servers always carry trust in the admission/resume ACK (and in
+      // presence), so absence is unambiguous evidence of a legacy/rolled-back
+      // server — inferring member preserves legacy drive semantics there.
+      // Client-side trust only gates what this client attempts; the server
+      // re-authorizes every op, so a wrong inference cannot escalate.
+      return 'member';
+    }
+
+    /* Public drive authority is the union of the two mode-specific rules:
+     * legacy leader-drive OR member-drive capability intersection. Guests are
+     * never drivers in either mode. Consumers that need the mode itself read
+     * memberDrive; they must not re-copy this union at every call site. */
+    function _canDrive() {
+      return _ownTrust() === 'member' &&
+        ((_member && _member.role === 'leader') || _memberDrive());
+    }
+
     function _public() {
       return {
         status: _deriveStatus(),
         role: _member ? _member.role : _roleIntent,
         memberId: _member ? _member.memberId : null,
+        trust: _ownTrust(),
+        memberDrive: _memberDrive(),
+        canDrive: _canDrive(),
         sessionId: _member ? _member.sessionId : null,
         code: _code,
         guestToken: _guestToken,
@@ -474,6 +539,10 @@
         side: _side(),
         transport: _effPlane(),
         phase: _lastState ? _lastState.phase : null,
+        browse: !!(_lastState && _lastState.browse === true),
+        browseOpener: _lastState ? _lastState.browseOpener || null : null,
+        browseOpenerRole: _lastState ? _lastState.browseOpenerRole || null : null,
+        browseGeneration: _lastState ? _lastState.browseGeneration || 0 : 0,
         spreadId: _lastState ? _lastState.spreadId : null,
         revision: _seen.rev < 0 ? 0 : _seen.rev,
         workEpoch: _seen.epoch < 0 ? 0 : _seen.epoch,
@@ -755,7 +824,7 @@
       var resumeF = {
         v: PROTOCOL_VERSION, requestId: _rid(), sessionId: d.sessionId,
         workEpoch: 0, baseRevision: 0, type: 'RESUME',
-        payload: {memberId: d.memberId, resumeToken: d.resumeToken},
+        payload: _withFeatures({memberId: d.memberId, resumeToken: d.resumeToken}),
       };
       var leaveF = {
         v: PROTOCOL_VERSION, requestId: _rid(), sessionId: d.sessionId,
@@ -1086,7 +1155,7 @@
       }
       _entry = {
         type: 'RESUME',
-        payload: {memberId: _member.memberId, resumeToken: _member.resumeToken},
+        payload: _withFeatures({memberId: _member.memberId, resumeToken: _member.resumeToken}),
         sessionId: _member.sessionId,
         res: function () {}, rej: function () {},
         rid: null, sent: false,
@@ -1102,6 +1171,12 @@
     }
 
     /* ── session entry ops ── */
+
+    function _withFeatures(payload) {
+      payload = payload || {};
+      if (_features.length) payload.features = _features.slice();
+      return payload;
+    }
 
     function _resetSession(keepRole) {
       _term = null;
@@ -1173,7 +1248,7 @@
       _teardownLink();
       _resetSession();
       _roleIntent = 'leader';
-      return _startEntry('CREATE', {}, null);
+      return _startEntry('CREATE', _withFeatures({}), null);
     }
 
     function join(code) {
@@ -1185,7 +1260,7 @@
       _teardownLink();
       _resetSession();
       _roleIntent = 'follower';
-      return _startEntry('JOIN', {code: code}, null);
+      return _startEntry('JOIN', _withFeatures({code: code}), null);
     }
 
     /* Guest-access join: the QR's `/#/join/<code>?gt=<token>` deep link resolves
@@ -1203,7 +1278,7 @@
       _teardownLink();
       _resetSession();
       _roleIntent = 'follower';
-      return _startEntry('JOIN', {guestToken: token}, null);
+      return _startEntry('JOIN', _withFeatures({guestToken: token}), null);
     }
 
     /* One-tap pairing: the server binds the caller as follower when a
@@ -1218,7 +1293,7 @@
       _teardownLink();
       _resetSession();
       // role decided by the server — no _roleIntent yet
-      return _startEntry('MATCH', pick ? {pick: pick} : {}, null);
+      return _startEntry('MATCH', _withFeatures(pick ? {pick: pick} : {}), null);
     }
 
     function resume() {
@@ -1247,9 +1322,9 @@
         _roleIntent = _member.role;
       }
       if (_offlineSince === null) _offlineSince = _now();
-      return _startEntry('RESUME', {
+      return _startEntry('RESUME', _withFeatures({
         memberId: creds.memberId, resumeToken: creds.resumeToken,
-      }, creds.sessionId);
+      }), creds.sessionId);
     }
 
     function approve() {
@@ -1371,6 +1446,11 @@
     /* ── intents -> wire frames (data plane) ── */
 
     var _READING_GATED = {TURN: 1, GOTO: 1, SET_OFFSET: 1, SWAP_SIDES: 1};
+    // Relay whitelist is exactly the sequenced data-plane set. Control
+    // frames (SET_ACTIVITY/SIGNAL/UI_SYNC/TRANSPORT_STATE/lifecycle) must
+    // never gain relayed authority through payload.origin.
+    var _RELAYABLE = {TURN: 1, GOTO: 1, SET_OFFSET: 1, SWAP_SIDES: 1,
+                      OPEN_WORK: 1, READY: 1, APPLIED: 1};
 
     function _sendIntentInternal(intent) {
       if (_destroyed || _term || _left || !_member || !_linkOpen()) return false;
@@ -1406,7 +1486,8 @@
                                   manifestVersion: _seenMv()});
           break;
         case 'openWork':
-          if (_member.role !== 'leader' || !_paired()) return false;
+          if (!_paired()) return false;
+          if (!_canDrive()) return false;
           if (typeof intent.folder !== 'string') return false;
           f = _req('OPEN_WORK', {
             folder: intent.folder,
@@ -1415,10 +1496,13 @@
             manifestVersion: _seenMv(),
           });
           if (f.payload.offset === undefined) delete f.payload.offset;
+          if (intent.auto === true) f.payload.auto = true;
           break;
         case 'browse':
-          // leader browsing the work list pauses the session at 'selecting'
-          if (_member.role !== 'leader' || !_paired()) return false;
+          // Legacy pairs keep leader-only browse entry; member-drive pairs
+          // allow either member (but never guest trust) to open shared browse.
+          if (!_paired()) return false;
+          if (!_canDrive()) return false;
           return _ctlSend(_req('SET_ACTIVITY', {state: 'selecting'}));
         default:
           return false;
@@ -1448,13 +1532,15 @@
      * leader's sidebar open/close pauses/resumes the shared session without
      * routing through an intent. 'browse' intents already map onto the same
      * wire frame via _sendIntentInternal. */
-    function setActivity(state) {
+    function setActivity(state, opts) {
       if (state !== 'active' && state !== 'suspended' &&
           state !== 'selecting') return false;
       if (_destroyed || _term || _left || !_member || !_linkOpen()) {
         return false;
       }
-      return _ctlSend(_req('SET_ACTIVITY', {state: state}));
+      var payload = {state: state};
+      if (opts && opts.endBrowse === true) payload.endBrowse = true;
+      return _ctlSend(_req('SET_ACTIVITY', payload));
     }
 
     /* Ephemeral mirrored-UI relay (browse scroll/position). Fire-and-forget
@@ -1493,6 +1579,13 @@
       var pr = payload.pred;
       if (typeof pr === 'number' && isFinite(pr) && pr >= 0 && pr <= 1e8)
         p.pred = pr;
+      // browseGeneration も任意フィールド — member-drive の世代タグ。削ると
+      // server/receiver 双方の世代 drop が untagged 扱いで無力化されるので、
+      // 正の整数だけをそのまま通す（legacy/mixed ではそもそも付かない）。
+      var bg = payload.browseGeneration;
+      if (typeof bg === 'number' && isFinite(bg) && bg >= 1 &&
+          Math.floor(bg) === bg)
+        p.browseGeneration = bg;
       return _ctlSend(_req('UI_SYNC', p));
     }
 
@@ -1584,6 +1677,7 @@
       _member.sessionId = d.sessionId || _member.sessionId;
       _member.memberId = d.memberId || _member.memberId;
       _member.role = d.role || _member.role;
+      _member.trust = d.trust || _member.trust || null;
       _member.resumeToken = d.resumeToken || _member.resumeToken;
       _roleIntent = _member.role;
       if (d.code) _code = d.code;
@@ -1715,7 +1809,19 @@
         manifestVersion: snap.manifestVersion, phase: snap.phase,
         spreadId: snap.spreadId, offset: snap.offset,
         leaderSide: snap.leaderSide,
-        presence: _lastState ? _lastState.presence : {},
+        browse: snap.browse === true,
+        browseOpener: snap.browseOpener || null,
+        browseOpenerRole: snap.browseOpenerRole || null,
+        browseGeneration: snap.browseGeneration || 0,
+        // Protocol contract: a REJECT snapshot is complete STATE-shaped
+        // data. If a malformed/older peer omits presence or features, fail
+        // closed on the missing capability facts instead of synthesizing
+        // them from a prior STATE (which can resurrect close/drive rights
+        // across the very transition the snapshot is reporting).
+        presence: (snap.presence && typeof snap.presence === 'object')
+          ? snap.presence
+          : {},
+        features: Array.isArray(snap.features) ? snap.features : undefined,
         dataPlane: snap.dataPlane || 'server-ws',
       };
       _onState(pseudo);
@@ -1955,24 +2061,30 @@
     }
 
     function _onDcFrame(f) {
-      if (_destroyed) return;
-      // leader-sequenced plane (§3.4): follower-ordered requests arriving on
-      // the DC are relayed verbatim + payload.origin through the leader's
-      // control channel. Everything else is a normal inbound frame.
-      if (f && typeof f === 'object' && _member &&
-          _member.role === 'leader' && _plane === 'webrtc-dc' &&
-          typeof f.requestId === 'string' && typeof f.type === 'string' &&
-          f.payload && typeof f.payload === 'object') {
-        var fwd = {};
-        for (var k in f) fwd[k] = f[k];
-        var p = {};
-        for (var k2 in f.payload) p[k2] = f.payload[k2];
-        p.origin = 'follower';
-        fwd.payload = p;
-        _ctlSend(fwd);
-        return;
+      if (_destroyed || !f || typeof f !== 'object') return;
+      // The DC is peer-to-peer input, never a server channel. Server-originated
+      // frames (STATE/END/UI_SYNC/TRANSPORT_STATE/...) legitimately arrive only
+      // on this client's authenticated server WS, so they must never enter
+      // _dispatch from the DC — the plane bit is itself attacker-influenceable
+      // during downgrade transitions and is not an authentication boundary.
+      if (_member && _member.role === 'leader') {
+        // On the leader's DC every inbound frame is follower-originated.
+        // Relay exactly the sequenced-op whitelist, independent of the
+        // currently advertised plane, and drop everything else. Followers
+        // have no legitimate inbound DC traffic at all: their requests go
+        // leader-ward, while responses/commits arrive on their own server WS.
+        if (typeof f.requestId === 'string' && typeof f.type === 'string' &&
+            _RELAYABLE[f.type] === 1 &&
+            f.payload && typeof f.payload === 'object') {
+          var fwd = {};
+          for (var k in f) fwd[k] = f[k];
+          var p = {};
+          for (var k2 in f.payload) p[k2] = f.payload[k2];
+          p.origin = 'follower';
+          fwd.payload = p;
+          _ctlSend(fwd);
+        }
       }
-      _dispatch(f, _gen);
     }
 
     function _onDcDown() {
@@ -2187,6 +2299,12 @@
   // pairClient.js が残った混在シェルを pairSync 側が検出し、双方向とも
   // legacy px 変換に倒せるようにする。index.html の watchdog 必須 marker。
   globalThis.BOOKQ_UI_SYNC_V2 = true;
+  // browseGeneration forwarding support: sendUiSync passes valid positive
+  // integer generation tags through to the wire instead of stripping them.
+  // member-drive advertised without this property silently drops the
+  // client's own frames server-side during explicit open sessions, so the
+  // composition gate requires it. index.html watchdog 必須 marker。
+  globalThis.BOOKQ_PAIR_CLIENT_API = 2;
 
   /* Cheap boot check (pairController): does a dead owner's persisted
    * resume record sit inside the resume window? Same staleness rule as
@@ -2261,6 +2379,7 @@
     PROTOCOL_VERSION: PROTOCOL_VERSION,
     STATUS: STATUS,
     END_REASON: END_REASON,
+    CAP_MEMBER_DRIVE: CAP_MEMBER_DRIVE,
     createClient: createClient,
     domEventTarget: domEventTarget,
     canonicalJson: canonicalJson,

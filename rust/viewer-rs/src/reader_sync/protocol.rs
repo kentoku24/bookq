@@ -6,6 +6,11 @@ use serde_json::{Map, Value};
 pub const PROTOCOL_VERSION: i64 = 1;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_MANIFEST_BYTES: usize = 32 * 1024 * 1024;
+/// requestId is the dedup/tombstone key — an attacker-controlled unbounded
+/// string would let a flood pin arbitrary memory in retention sets, so the
+/// wire caps it. Real clients use short random ids (single digits of
+/// base36), so 128 is far beyond legitimate use.
+pub const REQUEST_ID_MAX_LEN: usize = 128;
 
 pub const ERR_VERSION: &str = "ERR_VERSION";
 pub const ERR_MALFORMED: &str = "ERR_MALFORMED";
@@ -49,6 +54,11 @@ pub const SIGNAL_KINDS: &[&str] = &["offer", "answer", "ice"];
 pub const UI_VIEWS: &[&str] = &["browse"];
 pub const UI_MODES: &[&str] = &["tile", "list", "card"];
 pub const MAX_UI_PATH_CHARS: usize = 4096;
+/// Capability advertisements are short feature tokens. Unknown tokens are
+/// preserved (a newer peer may speak a feature this build does not know);
+/// only the envelope shape is bounded here.
+pub const MAX_FEATURES: usize = 32;
+pub const MAX_FEATURE_CHARS: usize = 64;
 
 const REQUEST_KEYS: &[&str] = &[
     "requestId",
@@ -148,8 +158,14 @@ pub fn parse_request(raw: &Map<String, Value>) -> Result<(), ProtocolError> {
             return fail(ERR_MALFORMED, format!("request missing key: {k}"));
         }
     }
-    if !raw["requestId"].as_str().is_some_and(|s| !s.is_empty()) {
-        return fail(ERR_MALFORMED, "requestId must be non-empty str");
+    if !raw["requestId"]
+        .as_str()
+        .is_some_and(|s| !s.is_empty() && s.len() <= REQUEST_ID_MAX_LEN)
+    {
+        return fail(
+            ERR_MALFORMED,
+            "requestId must be non-empty str within length cap",
+        );
     }
     if !(raw["sessionId"].is_null() || raw["sessionId"].is_string()) {
         return fail(ERR_MALFORMED, "sessionId must be str|null");
@@ -171,7 +187,37 @@ pub fn parse_request(raw: &Map<String, Value>) -> Result<(), ProtocolError> {
     validate_payload(t, &payload)
 }
 
+fn validate_features(p: &Map<String, Value>) -> Result<(), ProtocolError> {
+    let Some(features) = p.get("features") else {
+        return Ok(());
+    };
+    if features.is_null() {
+        return Ok(());
+    }
+    let Some(items) = features.as_array() else {
+        return fail(ERR_MALFORMED, "features must be an array of str");
+    };
+    if items.len() > MAX_FEATURES {
+        return fail(ERR_RANGE, "features has too many entries");
+    }
+    for item in items {
+        let ok = item
+            .as_str()
+            .is_some_and(|s| !s.is_empty() && s.chars().count() <= MAX_FEATURE_CHARS);
+        if !ok {
+            return fail(ERR_MALFORMED, "features entries must be non-empty str");
+        }
+    }
+    Ok(())
+}
+
 fn validate_payload(t: &str, p: &Map<String, Value>) -> Result<(), ProtocolError> {
+    // Session admission / resume frames carry the client's capability
+    // advertisement. This is additive in v1: absent or null means no
+    // advertised capabilities; when present it must be a bounded string list.
+    if matches!(t, "CREATE" | "JOIN" | "MATCH" | "RESUME") {
+        validate_features(p)?;
+    }
     match t {
         "TURN" => {
             // `delta not in (1,-1)` — Python `True == 1` lets `true` and
@@ -273,6 +319,25 @@ fn validate_payload(t: &str, p: &Map<String, Value>) -> Result<(), ProtocolError
                     parse_page_ref(page)?;
                 }
             }
+            if let Some(auto) = p.get("auto") {
+                if !auto.is_boolean() {
+                    return fail(ERR_MALFORMED, "OPEN_WORK.auto must be bool");
+                }
+            }
+        }
+        "SET_ACTIVITY" => {
+            if !p
+                .get("state")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| matches!(s, "active" | "suspended" | "selecting"))
+            {
+                return fail(ERR_TYPE, "SET_ACTIVITY.state must be active|suspended|selecting");
+            }
+            if let Some(end_browse) = p.get("endBrowse") {
+                if !end_browse.is_boolean() {
+                    return fail(ERR_MALFORMED, "SET_ACTIVITY.endBrowse must be bool");
+                }
+            }
         }
         "SIGNAL" => {
             if !p
@@ -335,6 +400,22 @@ fn validate_ui_sync(p: &Map<String, Value>) -> Result<(), ProtocolError> {
             return fail(ERR_RANGE, "UI_SYNC.mode must be tile|list|card");
         }
     }
+    // browseGeneration is additive/optional, but when present it must be a
+    // positive integer — a malformed tag must not silently degrade to
+    // untagged (which bypasses both generation drop checks as if the peer
+    // were legacy).
+    if let Some(bg) = p.get("browseGeneration") {
+        // Present-null is malformed too: the schema types the field as a
+        // non-nullable integer, and silently treating null as absent would
+        // degrade a client that tried to tag into an untagged legacy peer,
+        // bypassing both generation drop checks.
+        if bg.is_null() || !bg.as_i64().is_some_and(|v| v >= 1) {
+            return fail(
+                ERR_RANGE,
+                "UI_SYNC.browseGeneration must be int >= 1 when present",
+            );
+        }
+    }
     if let Some(pr) = p.get("pred") {
         if !pr.is_null() {
             let ok = pr
@@ -386,6 +467,26 @@ mod tests {
             ("baseRevision", Value::from(0)),
             ("payload", payload),
         ])
+    }
+
+    #[test]
+    fn request_id_length_cap() {
+        // The dedup/tombstone key derives from requestId — an unbounded
+        // attacker-controlled string would pin arbitrary memory in the
+        // retention sets, so the wire itself caps it.
+        let at_cap = "x".repeat(REQUEST_ID_MAX_LEN);
+        let mut r = req(
+            "TURN",
+            frame(&[("delta", Value::from(1)), ("crossChapter", Value::Bool(false))]),
+        );
+        r.as_object_mut().unwrap()["requestId"] = Value::String(at_cap);
+        parse_request(r.as_object().unwrap()).unwrap();
+        let over = "x".repeat(REQUEST_ID_MAX_LEN + 1);
+        r.as_object_mut().unwrap()["requestId"] = Value::String(over);
+        assert_eq!(
+            parse_request(r.as_object().unwrap()).unwrap_err().code,
+            ERR_MALFORMED
+        );
     }
 
     #[test]

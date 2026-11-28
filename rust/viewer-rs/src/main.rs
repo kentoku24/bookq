@@ -1360,9 +1360,18 @@ async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Respo
     match axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &st).await {
         Ok(wsu) => {
             let st2 = st.clone();
-            wsu.on_upgrade(move |socket| {
-                reader_sync_conn(socket, st2, user, guest_token)
-            })
+            // The protocol cap (64 KiB) is enforced in parse_frame only after
+            // axum has buffered the whole message — with default limits that
+            // means up to 64 MiB per message. Bound the transport well below
+            // that, but with slack above the protocol cap: marginally oversize
+            // input must still buffer completely so the protocol layer can
+            // reject it with the contractual 1009 close instead of the
+            // transport dying mid-stream without a close frame.
+            wsu.max_message_size(256 * 1024)
+                .max_frame_size(256 * 1024)
+                .on_upgrade(move |socket| {
+                    reader_sync_conn(socket, st2, user, guest_token)
+                })
         }
         Err(rej) => rej.into_response(),
     }
