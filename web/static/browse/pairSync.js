@@ -220,12 +220,20 @@
     // sides after simultaneous opens and makes an offline close→reopen keep
     // a stale seed. Legacy pairs have no opener field and remain fixed-role.
     _browseOpenerId = st.browseOpener || null;
-    // Pre-commit picking has no opener — the shared browse does not exist
-    // yet — so initiation falls back to the legacy role rule even in a
-    // member-drive pair. Once a work commits the pair disarms, and any
-    // later selecting phase is the explicit re-picking flow where the
-    // server-serialized opener is authoritative again.
-    var initiator = (st.memberDrive === true && !_preCommit(st))
+    // The opener rule is keyed on the explicit shared-browse open, not on
+    // the commit boundary: a member can open shared browse BEFORE the first
+    // work commit (initial shared work selection), and the server serializes
+    // an opener and a generation there exactly as it does post-commit — the
+    // pre-commit state only means the CASUAL mirror is in effect while no
+    // shared browse is open. Keying on _preCommit instead mis-elected the
+    // leader by role when the follower had explicitly opened: the opener
+    // stayed locked (never seeded) while the role-initiator's sidebar could
+    // be closed (never sends) — a deadlock where no mirror frame ever left
+    // either side and the peer list never opened. The casual role rule now
+    // covers exactly the cases it always did: legacy/mixed pairs, and the
+    // pre-commit picking window with no shared browse open.
+    var explicitOpen = st.memberDrive === true && st.browse === true;
+    var initiator = explicitOpen
       ? (_browseOpenerId !== null && _browseOpenerId === st.memberId)
       : st.role === 'leader';
     if (initiator) {

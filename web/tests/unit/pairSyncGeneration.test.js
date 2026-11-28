@@ -257,6 +257,43 @@ describe('pairSync browse generations', () => {
     expect(sendUiSync).toHaveBeenCalledTimes(2);
   });
 
+  it('pre-commit explicit open elects the server-serialized opener, not the role', () => {
+    // Initial shared work selection: no commit yet (spreadId null) but a
+    // member explicitly opened shared browse — the server serializes an
+    // opener and a generation exactly as it does post-commit. The opener
+    // (here the follower) must seed even though the casual pre-commit
+    // mirror would otherwise elect the leader by role; keying the election
+    // on _preCommit deadlocked the pair (opener locked, role-initiator's
+    // sidebar possibly closed — no frame ever left either side).
+    drive(state({
+      role: 'follower', memberId: 'm-follower',
+      spreadId: null,
+      browse: true, browseGeneration: 1,
+      browseOpener: 'm-follower', browseOpenerRole: 'follower',
+    }));
+    expect(sendUiSync).toHaveBeenCalledTimes(1);   // opener seed
+    expect(sentPayloads()[0].browseGeneration).toBe(1);
+
+    // The non-opener side of the same open must NOT seed by role — the
+    // leader stays locked until the opener's first frame arrives.
+    hook.reset();
+    sendUiSync.mockClear();
+    drive(state({
+      role: 'leader', memberId: 'm-leader',
+      spreadId: null,
+      browse: true, browseGeneration: 1,
+      browseOpener: 'm-follower', browseOpenerRole: 'follower',
+    }));
+    localScroll(30);
+    hook.flush();
+    expect(sendUiSync).not.toHaveBeenCalled();
+    hook.ctlEvent({type: 'ui-sync', payload: {
+      view: 'browse', path: null, top: 5, viewH: 100, mode: 'tile',
+      browseGeneration: 1,
+    }});
+    expect(hook.unlocked).toBe(true);
+  });
+
   it('post-commit re-picking stays strict: no arm without browse open in member-drive', () => {
     // Same selecting phase but with a committed work (spreadId set) and no
     // open browse: the member-drive strict rule applies and nothing arms.
