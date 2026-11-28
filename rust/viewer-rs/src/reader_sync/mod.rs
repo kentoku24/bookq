@@ -127,6 +127,24 @@ pub const JOIN_FAIL_WINDOW_SEC: f64 = 60.0;
 /// UI_SYNC rate cap per member — excess frames drop silently so a buggy
 /// sender can't fill the peer's bounded outq.
 pub const UI_SYNC_WINDOW_SEC: f64 = 1.0;
+
+/// Close the shared browse as a causal epoch transition. The generation is
+/// session-scoped and monotonic: it advances on EVERY true open→closed
+/// transition exactly as it does on closed→open, so mirror traffic causally
+/// produced before the boundary — a commit, an explicit endBrowse, a legacy
+/// leader close, or a capability downgrade — can be told apart from traffic
+/// produced after it. Without this, a pre-commit-generation frame honestly
+/// tagged with the still-current generation could cross an OPEN_WORK commit
+/// and reopen shared picking after the pair already chose a work.
+/// Idempotent closes (already closed) do not advance the epoch.
+fn close_browse_epoch(s: &mut PairSession) {
+    if s.browse_open {
+        s.browse_generation += 1;
+    }
+    s.browse_open = false;
+    s.browse_opener_id = None;
+}
+
 pub const UI_SYNC_RATE_MAX: u32 = 50;
 
 // ── opaque ids / tokens / codes ──────────────────────────────────────────
@@ -1908,8 +1926,7 @@ impl Inner {
         if intersected_before && !intersected_after {
             if let Some(s) = self.session_mut(&sid) {
                 if s.browse_open {
-                    s.browse_open = false;
-                    s.browse_opener_id = None;
+                    close_browse_epoch(s);
                     tracing::info!(
                         "reader-sync session={} shared browse closed on capability downgrade",
                         sid
@@ -2034,8 +2051,7 @@ impl Inner {
                 // member may send it. Suspend/visibility restoration never do.
                 if end_browse {
                     if let Some(s) = self.session_mut(sid) {
-                        s.browse_open = false;
-                        s.browse_opener_id = None;
+                        close_browse_epoch(s);
                     }
                 }
             } else if is_leader {
@@ -2043,8 +2059,7 @@ impl Inner {
                 // leader leaving the selecting activity clears the browse
                 // flag. (Capability-unaware clients depend on this close.)
                 if let Some(s) = self.session_mut(sid) {
-                    s.browse_open = false;
-                    s.browse_opener_id = None;
+                    close_browse_epoch(s);
                 }
             }
         }
@@ -2167,7 +2182,15 @@ impl Inner {
                 }
             }
             None => {
-                if intersection && browse_open {
+                // Once a generation exists in a member-drive pair, every
+                // honest current build tags — an untagged frame is either a
+                // pre-upgrade straggler or a pre-STATE boot artifact and is
+                // dropped regardless of the open boolean. Generation zero
+                // (never opened) is the casual picking mirror and passes.
+                let gen_positive = self
+                    .session(sid)
+                    .is_some_and(|s| s.browse_generation > 0);
+                if intersection && gen_positive {
                     return;
                 }
             }
@@ -2904,8 +2927,11 @@ impl Inner {
                 dedup_tombstone(s, carry_key, true);
             }
             // A successful OPEN_WORK commit is the authoritative end of the
-            // shared browse regardless of which member opened it.
-            s.browse_open = false;
+            // shared browse regardless of which member opened it. The close
+            // is a causal epoch transition: mirror frames emitted before the
+            // commit carry the pre-close generation and must not be relayed
+            // into the committed work's aftermath.
+            close_browse_epoch(s);
             s.committed_load_auto = Some(job.auto);
             s.apply_seq += 1;
         }
@@ -4314,7 +4340,8 @@ mod tests {
         assert!(!inner.session(&sid).unwrap().browse_open);
         assert_eq!(state.get("browse"), Some(&Value::Bool(false)),
             "capability-loss close must stay explicit after the intersection is gone: {state:?}");
-        assert_eq!(state.get("browseGeneration"), Some(&Value::from(1)));
+        assert_eq!(state.get("browseGeneration"), Some(&Value::from(2)),
+            "the close is itself an epoch transition: generation advances past the open epoch");
         assert_eq!(state["presence"][mid2]["features"], Value::Array(vec![]));
     }
 
@@ -4694,7 +4721,9 @@ mod tests {
             "untagged frames drop once the member-drive intersection holds"
         );
 
-        // Close, reopen — generation 2. The old generation is dead on arrival.
+        // Close is itself an epoch transition — generation 2 is the closed
+        // casual epoch: pre-close frames causally ignorant of the close are
+        // dead on arrival, while post-close casual traffic tagged 2 relays.
         inner.dispatch(
             &reg,
             &l1,
@@ -4710,6 +4739,25 @@ mod tests {
         );
         drain_texts(&mut r1);
         drain_texts(&mut r2);
+        assert_eq!(
+            inner.session(&sid).unwrap().browse_generation,
+            2,
+            "an open-to-closed transition advances the epoch"
+        );
+        inner.dispatch(&reg, &l1, &ui(Some(1)));
+        assert_eq!(
+            relayed_gen(&mut r2),
+            None,
+            "a pre-close frame must not cross the close boundary"
+        );
+        inner.dispatch(&reg, &l1, &ui(Some(2)));
+        assert_eq!(
+            relayed_gen(&mut r2),
+            Some(2),
+            "casual traffic tagged with the closed epoch relays"
+        );
+
+        // Reopen — generation 3. Both older generations are dead on arrival.
         inner.dispatch(
             &reg,
             &l1,
@@ -4722,7 +4770,7 @@ mod tests {
         );
         drain_texts(&mut r1);
         drain_texts(&mut r2);
-        assert_eq!(inner.session(&sid).unwrap().browse_generation, 2);
+        assert_eq!(inner.session(&sid).unwrap().browse_generation, 3);
 
         inner.dispatch(&reg, &l1, &ui(Some(1)));
         assert_eq!(
@@ -4731,7 +4779,13 @@ mod tests {
             "a frame causally bound to the dead generation must not cross the boundary"
         );
         inner.dispatch(&reg, &l1, &ui(Some(2)));
-        assert_eq!(relayed_gen(&mut r2), Some(2));
+        assert_eq!(
+            relayed_gen(&mut r2),
+            None,
+            "the closed-epoch tag dies when the browse reopens"
+        );
+        inner.dispatch(&reg, &l1, &ui(Some(3)));
+        assert_eq!(relayed_gen(&mut r2), Some(3));
     }
 
     #[tokio::test]
