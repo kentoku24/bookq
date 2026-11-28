@@ -106,8 +106,9 @@
   /* ── committed-state sink ── */
 
   /* Drive authority for this client/mode. The new client surface exposes
-   * `canDrive` (trust-aware). A pre-trust pairClient (stale SWR shell or a
-   * rolled-back server that never emits trust) has no such field —
+   * `canDrive` (trust-aware). Only a stale pre-trust pairClient shell has
+   * no such field — a rolled-back server still yields a boolean because the
+   * new pairClient infers legacy member trust when the server omits it —
    * `undefined` there means the legacy surface, whose authority is purely
    * role-based, so fall back to `role === 'leader'` rather than dead-ending
    * every drive action or bailing picks to solo. An explicit boolean

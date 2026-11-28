@@ -117,10 +117,6 @@ describe('pairClient wire composition', () => {
   });
 
   it('emits features on CREATE/MATCH/RESUME when the composition opts in', async () => {
-    const opted = makeClient(fakeTransport(), {
-      features: [globalThis.PairClient.CAP_MEMBER_DRIVE],
-    });
-    const ot = opted && t;
     // CREATE — driven through the opted client's own transport.
     const ct = fakeTransport();
     const c2 = makeClient(ct, {features: [globalThis.PairClient.CAP_MEMBER_DRIVE]});
@@ -134,6 +130,21 @@ describe('pairClient wire composition', () => {
              resumeToken: 'rt9', code: '654321', trust: 'member'},
     });
     await p;
+
+    // MATCH — one-tap pairing advertises on the entry frame too.
+    const mt = fakeTransport();
+    const c4 = makeClient(mt, {features: [globalThis.PairClient.CAP_MEMBER_DRIVE]});
+    const mp = c4.match();
+    mt.emit({v: 1, type: 'HELLO'});
+    const matchf = mt.sent.find((f) => f.type === 'MATCH');
+    expect(matchf, 'MATCH entry frame must be sent').toBeTruthy();
+    expect(matchf.payload.features).toEqual(['member-drive-v1']);
+    mt.emit({
+      v: 1, type: 'ACK', request: 'MATCH', requestId: matchf.requestId,
+      data: {sessionId: 's10', memberId: 'm10', role: 'leader',
+             resumeToken: 'rt10', code: '111111', trust: 'member'},
+    });
+    await mp;
 
     // RESUME — same advertisement on the resume entry frame. resume()
     // reads credentials from the injected storage, not arguments.
@@ -159,6 +170,7 @@ describe('pairClient wire composition', () => {
     });
     await rp;
     c2.destroy();
+    c4.destroy();
     c3.destroy();
   });
 });
