@@ -37,7 +37,7 @@
   var _selIssued = false;    // a SET_ACTIVITY selecting is outstanding
   var _wireBrowse = null;    // last authoritative shared-browse bool (member-drive)
   var _sawJoinReq = false;   // joinRequest edge — auto-approve (#114)
-  var _heldCommit = null;    // newest suppressed commit while leader browses
+  var _heldCommit = null;    // newest suppressed commit while a member browses
   var _pendingCommit = null; // newest commit held while visibility is pending
   var _lastApply = null;     // newest committed args, for display re-arm
   var _appliedKey = null;    // display key of the newest APPLIED commit
@@ -131,10 +131,16 @@
    * list? `localRole` is the role of THIS member (never the commit's
    * origin): legacy mode lets only the leader drive that list. In
    * member-drive mode the snapshot's explicit browse bit is the authority
-   * that the list is a shared surface. Guests never hold that echo. */
-  function _mayHoldSharedBrowseEcho(localRole, memberDrive, trust, browseOpen) {
+   * that the list is a shared surface — except during the open roundtrip:
+   * after we issue SET_ACTIVITY selecting and before the browse:true STATE
+   * lands, every snap still carries the bit false, so the bit alone would
+   * deny the hold exactly while the user is opening the list. `selIssued`
+   * covers that window; it clears on the wire close edge and on local
+   * close, so it cannot outlive the shared browse itself. Guests never
+   * hold that echo. */
+  function _mayHoldSharedBrowseEcho(localRole, memberDrive, trust, browseOpen, selIssued) {
     if (trust !== 'member') return false;
-    if (memberDrive === true) return browseOpen === true;
+    if (memberDrive === true) return browseOpen === true || selIssued === true;
     return localRole === 'leader';
   }
 
@@ -164,7 +170,7 @@
     var memberDrive = !!(stNow && stNow.memberDrive === true);
     var mayHoldSharedBrowseEcho = _mayHoldSharedBrowseEcho(
       o && o.role, memberDrive, stNow && stNow.trust,
-      !!(snap && snap.browse === true));
+      !!(snap && snap.browse === true), _selIssued);
     if (mayHoldSharedBrowseEcho && _sidebarOpen() &&
         _displayKey(snap) === _appliedKey) {
       // A member is browsing the shared-work list: an echo that changes
@@ -829,6 +835,7 @@
     window.__pairCtlTest = {
       applyCommitted: _applyCommitted,
       driveAllowed: _driveAllowed,
+      mayHoldSharedBrowseEcho: _mayHoldSharedBrowseEcho,
       get pendingCommit() { return _pendingCommit; },
       get heldCommit() { return _heldCommit; },
     };

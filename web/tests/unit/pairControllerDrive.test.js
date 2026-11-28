@@ -43,4 +43,25 @@ describe('pairController drive authority and echo-hold decisions', () => {
     expect(seam.driveAllowed(undefined)).toBe(false);
   });
 
+  it('echo-hold follows the snap browse bit once the open roundtrip settles', () => {
+    // member-drive, settled open: bit true holds even without an issuance.
+    expect(seam.mayHoldSharedBrowseEcho('follower', true, 'member', true, false)).toBe(true);
+    // settled closed: nothing holds.
+    expect(seam.mayHoldSharedBrowseEcho('follower', true, 'member', false, false)).toBe(false);
+  });
+
+  it('echo-hold covers the open roundtrip window through selIssued', () => {
+    // Between emitting SET_ACTIVITY selecting and the browse:true STATE
+    // landing, every snap still carries the bit false. The issuance is the
+    // only fact proving this member is opening the shared list — without
+    // it a no-op echo in that window slams the sidebar shut.
+    expect(seam.mayHoldSharedBrowseEcho('follower', true, 'member', false, true)).toBe(true);
+  });
+
+  it('echo-hold keeps guests and legacy followers out in every window', () => {
+    expect(seam.mayHoldSharedBrowseEcho('leader', true, 'guest', true, true)).toBe(false);
+    expect(seam.mayHoldSharedBrowseEcho('follower', false, 'member', true, true)).toBe(false);
+    // legacy leader holds regardless of bits — the role itself is the authority.
+    expect(seam.mayHoldSharedBrowseEcho('leader', false, 'member', false, false)).toBe(true);
+  });
 });
