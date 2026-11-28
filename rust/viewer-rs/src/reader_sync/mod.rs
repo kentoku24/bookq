@@ -2826,8 +2826,21 @@ impl Inner {
             // resolver is in flight. Keep a cache scan only as a defensive
             // fallback for internally constructed sessions that predate the
             // retention field being populated.
+            // The trigger is the request whose resolution committed this
+            // epoch — whatever op started the job (OPEN_WORK or SET_OFFSET).
+            // This is deliberately NOT dedup_frame_is_load: that predicate
+            // scopes cross-epoch tombstone protection to OPEN_WORK (the only
+            // epoch-gate-exempt op), while the carry must cover the job kind
+            // that actually triggered the rollover. A SET_OFFSET load ACK
+            // must ride the epoch too, or its resend is answered
+            // stale_request instead of the identical ACK.
             let valid_trigger = |frame: &Value| {
-                dedup_frame_is_load(frame)
+                frame
+                    .get("request")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_lowercase)
+                    .as_deref()
+                    == Some(job.kind.as_str())
                     && frame.get("type").and_then(|v| v.as_str()) == Some("ACK")
                     && frame.get("requestId").and_then(|v| v.as_str())
                         == Some(job.request_id.as_str())
@@ -2842,7 +2855,7 @@ impl Inner {
                     continue;
                 };
                 let is_load = dedup_frame_is_load(frame);
-                let is_trigger_ack = *key == carry_key && is_load && valid_trigger(frame);
+                let is_trigger_ack = *key == carry_key && valid_trigger(frame);
                 if is_trigger_ack {
                     if carried.is_none() {
                         carried = Some((key.clone(), frame.clone()));
@@ -2859,10 +2872,13 @@ impl Inner {
             if let Some((key, frame)) = carried {
                 s.dedup.insert(key.clone(), frame);
                 s.dedup_order.push_back(key);
-            } else {
+            } else if job.kind == "open_work" {
                 // Losing the trigger outcome must never make its retransmission
                 // executable again. This should be unreachable now that the job
                 // retains the ACK, but fail closed if the invariant is broken.
+                // Only OPEN_WORK needs the tombstone: epoch-gated trigger kinds
+                // (SET_OFFSET) are already stopped by the epoch check, so
+                // spending the OPEN_WORK-only budget on them would be pure loss.
                 dedup_tombstone(s, carry_key, true);
             }
             // A successful OPEN_WORK commit is the authoritative end of the
@@ -4344,6 +4360,100 @@ mod tests {
         );
         assert_eq!(frames[0]["type"], "ACK");
         assert_eq!(frames[0]["requestId"], "trigger-open");
+        assert!(inner.session(&sid).unwrap().pending_load.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_offset_trigger_ack_carries_across_epoch_commit() {
+        // SET_OFFSET is a load job too: a non-no-op flip starts a resolver
+        // whose commit rolls the epoch. Its trigger ACK must carry across the
+        // rollover exactly like OPEN_WORK's — otherwise a post-commit resend
+        // is answered stale_request instead of the identical ACK, and the
+        // fail-closed path would burn OPEN_WORK-only tombstone budget on a
+        // key the epoch gate already protects.
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner,
+            &reg,
+            &l1,
+            &mut r1,
+            &l2,
+            &mut r2,
+            &[CAP_MEMBER_DRIVE],
+            &[CAP_MEMBER_DRIVE],
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+
+        // Open a work so SET_OFFSET has something to resolve against.
+        let page = protocol::frame(&[
+            ("folder", "work".into()),
+            ("name", "p001.png".into()),
+        ]);
+        let open_payload = protocol::frame(&[
+            ("folder", "work".into()),
+            ("page", page),
+        ]);
+        let open = req_named("OPEN_WORK", &sid, open_payload, "open-1");
+        inner.dispatch(&reg, &l1, &open);
+        let job1 = inner
+            .session(&sid)
+            .and_then(|s| s.pending_load.clone())
+            .expect("OPEN_WORK leaves a pending load");
+        inner.finish_load(&sid, &job1, Ok(test_manifest()));
+        assert_eq!(inner.session(&sid).unwrap().work_epoch, 1);
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+
+        // A non-no-op flip starts a second load job. The session is at epoch
+        // 1 after the open commit, and SET_OFFSET is epoch-gated.
+        let flip_payload = protocol::frame(&[("offset", Value::from(1))]);
+        let mut flip = req_named("SET_OFFSET", &sid, flip_payload, "flip-1");
+        {
+            let s = inner.session(&sid).unwrap();
+            flip.insert("workEpoch".into(), Value::from(s.work_epoch));
+            flip.insert("baseRevision".into(), Value::from(s.revision));
+        }
+        inner.dispatch(&reg, &l1, &flip);
+        let job2 = inner
+            .session(&sid)
+            .and_then(|s| s.pending_load.clone())
+            .expect("non-no-op SET_OFFSET starts a load job");
+        assert_eq!(job2.kind, "set_offset");
+        inner.finish_load(&sid, &job2, Ok(test_manifest()));
+        {
+            let s = inner.session(&sid).unwrap();
+            assert_eq!(s.work_epoch, 2);
+            let carried = s
+                .dedup
+                .get("leader:flip-1")
+                .expect("SET_OFFSET trigger ACK must carry across its epoch commit");
+            assert_eq!(carried["type"], "ACK");
+            assert_eq!(carried["request"], "SET_OFFSET");
+            assert!(
+                !s.dedup_load_seen.contains("leader:flip-1"),
+                "an epoch-gated trigger must not consume OPEN_WORK tombstone budget"
+            );
+        }
+
+        // Resend: the identical cached ACK alone, never stale_request,
+        // never a second load.
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+        inner.dispatch(&reg, &l1, &flip);
+        let frames = drain_texts(&mut r1);
+        assert_eq!(
+            frames.len(),
+            1,
+            "resend must replay the cached ACK alone: {frames:?}"
+        );
+        assert_eq!(frames[0]["type"], "ACK");
+        assert_eq!(frames[0]["requestId"], "flip-1");
         assert!(inner.session(&sid).unwrap().pending_load.is_none());
     }
 
