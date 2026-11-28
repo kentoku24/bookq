@@ -294,17 +294,20 @@ describe('pairSync browse generations', () => {
     expect(hook.unlocked).toBe(true);
   });
 
-  it('post-commit re-picking stays strict: no arm without browse open in member-drive', () => {
-    // Same selecting phase but with a committed work (spreadId set) and no
-    // open browse: the member-drive strict rule applies and nothing arms.
+  it('post-commit tile browsing shares casually without an explicit open', () => {
+    // Product decision: tile browsing is always shared. A committed work
+    // (spreadId set) with no open browse is the same human activity as the
+    // initial picking — the casual mirror arms and the leader seeds by role.
     drive(state({
       role: 'leader', memberId: 'm-leader',
       browse: false, browseGeneration: 0,
       browseOpener: null, browseOpenerRole: null,
     }));
+    expect(sendUiSync).toHaveBeenCalled();   // casual seed on arm
+    sendUiSync.mockClear();
     localScroll(30);
     hook.flush();
-    expect(sendUiSync).not.toHaveBeenCalled();
+    expect(sendUiSync).toHaveBeenCalled();
   });
 
   it('treats generation emergence while continuously armed as a boundary', () => {

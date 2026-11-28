@@ -2116,32 +2116,23 @@ impl Inner {
             );
             return;
         }
-        // UI_SYNC is ephemeral, but on a closed browse it is also the frame
-        // that would make the receiver open its list. Nobody — member or
-        // guest — may start the shared browse merely by emitting mirror
-        // traffic. Participants may relay only after an authorized member
-        // opened it through SET_ACTIVITY.
+        // Tile browsing is always shared between members (product decision,
+        // restoring the legacy behavior): mirror traffic relays whenever the
+        // pair is established, whether or not a shared browse was explicitly
+        // opened — picking the first work and browsing after closing one are
+        // the same human activity. There is no closed-browse gate: the
+        // explicit-open flow only adds the generation-discriminated causal
+        // protection below, it is never a precondition for relaying.
         //
-        // Exception: before the first work commit there is no shared browse
-        // to open — mirror traffic in that window is the casual
-        // work-picking mirror (product decision: the picking process itself
-        // is shared). It carries no position in any work and cannot open
-        // anything, so it relays exactly as it did before the shared-browse
-        // encoding existed — for members. A guest's frames still may not
-        // reach the host: the picking share is a member affordance, while a
-        // guest watching the owner's picking only ever receives. Once a
-        // manifest exists, the strict gate applies: the explicit-open flow
-        // (作品変更) is the only way mirror traffic is allowed, and the
-        // initial pre-commit phase being `selecting` does not count — the
-        // boolean (not the derived phase) is the authority there.
-        let pre_commit = self.session(sid).is_some_and(|s| s.manifest.is_none())
-            && self
-                .session(sid)
-                .and_then(|s| s.members.iter().find(|m| m.id == mid))
-                .is_some_and(|m| m.trust != TRUST_GUEST);
-        let starting_closed_browse =
-            !pre_commit && !self.session(sid).is_some_and(|s| s.browse_open);
-        if starting_closed_browse {
+        // A guest's frames are the exception: guests only ever receive the
+        // mirror, they may not emit it — except while a shared browse is
+        // explicitly open, where participation was always allowed.
+        let sender_is_guest = self
+            .session(sid)
+            .and_then(|s| s.members.iter().find(|m| m.id == mid))
+            .is_some_and(|m| m.trust == TRUST_GUEST);
+        let browse_open = self.session(sid).is_some_and(|s| s.browse_open);
+        if sender_is_guest && !browse_open {
             self.reject(
                 link_id,
                 req_id(req),
@@ -2176,7 +2167,7 @@ impl Inner {
                 }
             }
             None => {
-                if intersection && self.session(sid).is_some_and(|s| s.browse_open) {
+                if intersection && browse_open {
                     return;
                 }
             }

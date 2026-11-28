@@ -4564,7 +4564,7 @@
   },
   {
    "id": "ui_sync_browse_gate_and_generation_relay",
-   "title": "UI_SYNC: closed browse rejects; untagged drops once the member-drive intersection is established; matching generation relays; mismatch drops; malformed/null tags are malformed",
+   "title": "UI_SYNC: tile browsing relays for members even on a closed browse (always-shared picking); untagged drops once the member-drive intersection is established with browse open; matching generation relays; mismatch drops; malformed/null tags are malformed",
    "setup": "reading",
    "resolver": "work",
    "features": {
@@ -4598,21 +4598,26 @@
     {
      "op": "expect",
      "link": "L1",
-     "frames": [
-      {
-       "v": 1,
-       "type": "REJECT",
-       "requestId": "uc1",
-       "request": "UI_SYNC",
-       "reason": "forbidden",
-       "sessionId": "@session"
-      }
-     ]
+     "frames": []
     },
     {
      "op": "expect",
      "link": "L2",
-     "frames": []
+     "frames": [
+      {
+       "v": 1,
+       "type": "UI_SYNC",
+       "sessionId": "@session",
+       "from": "leader",
+       "payload": {
+        "view": "browse",
+        "path": null,
+        "top": 5,
+        "viewH": 100,
+        "mode": "tile"
+       }
+      }
+     ]
     },
     {
      "op": "send",
