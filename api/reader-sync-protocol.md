@@ -92,10 +92,13 @@ CREATE ACK{…, guestToken}  →  クライアントが QR
   ペア同期は WebSocket のため影響なし — follower として TURN/GOTO/
   SET_OFFSET 等は通常 follower と同一に受理される。ただし作品選択の drive
   （OPEN_WORK）と shared browse open/close は trust=member のみで、guest は
-  direct/relay のどちらでも `forbidden`。UI_SYNC は ephemeral だが closed
-  browse で送ると受信側の一覧を開き得るため、**member/guest を問わず**
-  shared browse が開いていない間の UI_SYNC は `forbidden` で拒否する
-  （member が既に開いた mirror への参加は trust に関係なく拒否しない）
+  direct/relay のどちらでも `forbidden`。UI_SYNC は ephemeral で、
+  tile browsing は常に共有される（プロダクト判断 — 初回 picking と
+  作品を閉じた後の物色は同じ行為であり、legacy は常に mirror していた）
+  ため、**member の UI_SYNC は pair 成立中は browse open の有無に関わらず
+  relay される**。guest の UI_SYNC は shared browse が明示的に開いている
+  間だけ relay され、それ以外では `forbidden` で拒否する（guest は
+  mirror を受け取るだけで、発信は member の affordance）
 - guest 応答には `X-Bookq-Guest: 1` + `Cache-Control: private, no-store`
   — SW・ページ側キャッシュとブラウザ HTTP キャッシュの双方が失効後に
   再提供しない
