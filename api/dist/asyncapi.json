@@ -1046,6 +1046,11 @@
       },
       "UiSyncPayload": {
         "properties": {
+          "browseGeneration": {
+            "description": "送信者が観測した browse generation（member-drive のみ・additive）。 close→reopen で server 側 generation が進んだ後に到着した旧 generation の frame は server が relay せず drop し、relay を抜けたものも受信側が 現行 generation と不一致なら drop する — 世代境界を跨いだ in-flight frame が新 generation の初期状態（opener の first seed / unlock 判定） を汚染するのを防ぐ。タグなし（legacy/mixed peer）の frame は検証不能な ため従来通り relay される。\n",
+            "minimum": 1,
+            "type": "integer"
+          },
           "mode": {
             "enum": [
               "tile",

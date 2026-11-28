@@ -2134,6 +2134,23 @@ impl Inner {
             );
             return;
         }
+        // A UI_SYNC that carries a generation is causally bound to the
+        // browse generation the sender observed. A close→reopen increments
+        // the server-side generation, so a frame that was honest when sent
+        // but arrives after the boundary must not be relayed into the new
+        // generation — the receiver has no other way to tell it apart from
+        // the new opener's first seed. Ephemeral traffic is dropped, not
+        // rejected: a generation skew is a race outcome, not an error.
+        // Frames without the field (legacy/mixed clients) relay as before.
+        if let Some(gen) = req["payload"]
+            .get("browseGeneration")
+            .and_then(|v| v.as_i64())
+        {
+            let current = self.session(sid).map(|s| s.browse_generation);
+            if current != Some(gen) {
+                return;
+            }
+        }
         let other_link = self.session(sid).and_then(|s| {
             s.members
                 .iter()
@@ -4457,6 +4474,115 @@ mod tests {
             "follower must see the exhausted END: {frames2:?}"
         );
         assert!(inner.session(&sid).is_none());
+    }
+
+    #[tokio::test]
+    async fn ui_sync_generation_boundary_drop() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner,
+            &reg,
+            &l1,
+            &mut r1,
+            &l2,
+            &mut r2,
+            &[CAP_MEMBER_DRIVE],
+            &[CAP_MEMBER_DRIVE],
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+
+        let ui = |gen: Option<i64>| {
+            let mut p = protocol::frame(&[
+                ("view", "browse".into()),
+                ("top", Value::from(10)),
+                ("viewH", Value::from(100)),
+            ]);
+            if let Some(g) = gen {
+                p["browseGeneration"] = Value::from(g);
+            }
+            req_named("UI_SYNC", &sid, p, "ui")
+        };
+        let relayed_gen = |rx: &mut mpsc::Receiver<OutItem>| -> Option<i64> {
+            drain_texts(rx)
+                .iter()
+                .find(|f| f["type"] == "UI_SYNC")
+                .and_then(|f| f["payload"]["browseGeneration"].as_i64())
+        };
+
+        // Open the shared browse — generation 1 begins.
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "selecting".into())]),
+                "open-1",
+            ),
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+        assert_eq!(
+            inner.session(&sid).unwrap().browse_generation,
+            1,
+            "the first closed-to-open transition owns generation 1"
+        );
+
+        // Matching generation relays; mismatched drops; untagged relays.
+        inner.dispatch(&reg, &l1, &ui(Some(1)));
+        assert_eq!(relayed_gen(&mut r2), Some(1));
+        inner.dispatch(&reg, &l1, &ui(Some(99)));
+        assert_eq!(relayed_gen(&mut r2), None, "future/stale gen must drop");
+        inner.dispatch(&reg, &l1, &ui(None));
+        assert!(
+            drain_texts(&mut r2).iter().any(|f| f["type"] == "UI_SYNC"),
+            "untagged (legacy) frames relay as before"
+        );
+
+        // Close, reopen — generation 2. The old generation is dead on arrival.
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[
+                    ("state", "active".into()),
+                    ("endBrowse", Value::Bool(true)),
+                ]),
+                "close-1",
+            ),
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "selecting".into())]),
+                "open-2",
+            ),
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+        assert_eq!(inner.session(&sid).unwrap().browse_generation, 2);
+
+        inner.dispatch(&reg, &l1, &ui(Some(1)));
+        assert_eq!(
+            relayed_gen(&mut r2),
+            None,
+            "a frame causally bound to the dead generation must not cross the boundary"
+        );
+        inner.dispatch(&reg, &l1, &ui(Some(2)));
+        assert_eq!(relayed_gen(&mut r2), Some(2));
     }
 
     #[tokio::test]

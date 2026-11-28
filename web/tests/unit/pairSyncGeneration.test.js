@@ -118,6 +118,73 @@ describe('pairSync browse generations', () => {
     expect(hook.unlocked).toBe(false);
   });
 
+  it('tags outgoing mirror traffic with the observed generation', () => {
+    drive(state());
+    expect(sendUiSync).toHaveBeenCalledTimes(1);
+    // The opener seed is causally bound to generation 1 — the tag is what
+    // lets the server and the receiver drop it if a close→reopen boundary
+    // lands while the frame is in flight.
+    expect(sentPayloads()[0].browseGeneration).toBe(1);
+
+    sendUiSync.mockClear();
+    drive(state({
+      browseGeneration: 2,
+      browseOpener: 'm-leader', browseOpenerRole: 'leader',
+    }));
+    hook.applyRemote({view: 'browse', path: null, top: 0, viewH: 100, mode: 'tile'});
+    localScroll(42);
+    hook.flush();
+    expect(sendUiSync).toHaveBeenCalledTimes(1);
+    expect(sentPayloads()[0].browseGeneration).toBe(2);
+  });
+
+  it('drops inbound frames tagged with a foreign generation before they apply or unlock', () => {
+    // Follower, gen-2, not the opener — locked until the opener's first seed.
+    drive(state({
+      browseGeneration: 2,
+      browseOpener: 'm-leader', browseOpenerRole: 'leader',
+    }));
+    expect(hook.unlocked).toBe(false);
+
+    // A stale gen-1 echo crossing the boundary must neither unlock nor
+    // apply — it is never the new opener's first seed. ctlEvent is the real
+    // entry point (the controller event bus), not the applyRemote seam.
+    // The observable consequence of staying locked: even a real local
+    // scroll emits nothing.
+    hook.ctlEvent({type: 'ui-sync', payload: {
+      view: 'browse', path: null, top: 55, viewH: 100, mode: 'tile',
+      browseGeneration: 1,
+    }});
+    expect(hook.unlocked).toBe(false);
+    localScroll(30);
+    hook.flush();
+    expect(sendUiSync).not.toHaveBeenCalled();
+
+    // The genuine gen-2 opener frame unlocks and applies — proof is that a
+    // subsequent local scroll resumes sending.
+    hook.ctlEvent({type: 'ui-sync', payload: {
+      view: 'browse', path: null, top: 55, viewH: 100, mode: 'tile',
+      browseGeneration: 2,
+    }});
+    expect(hook.unlocked).toBe(true);
+    localScroll(42);
+    hook.flush();
+    expect(sendUiSync).toHaveBeenCalledTimes(1);
+
+    // Untagged frames (legacy/mixed peer) cannot be verified and pass through.
+    hook.reset();
+    sendUiSync.mockClear();
+    drive(state({
+      browseGeneration: 2,
+      browseOpener: 'm-leader', browseOpenerRole: 'leader',
+    }));
+    expect(hook.unlocked).toBe(false);
+    hook.ctlEvent({type: 'ui-sync', payload: {
+      view: 'browse', path: null, top: 20, viewH: 100, mode: 'tile',
+    }});
+    expect(hook.unlocked).toBe(true);
+  });
+
   it('explicit closed browse metadata disarms sending across memberDrive loss', () => {
     drive(state());
     sendUiSync.mockClear();

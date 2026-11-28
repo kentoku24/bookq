@@ -310,7 +310,20 @@
   }
 
   function _onCtlEvent(e) {
-    if (e && e.type === 'ui-sync') _applyRemote(e.payload);
+    if (!(e && e.type === 'ui-sync')) return;
+    var msg = e.payload;
+    // Generation-tagged frames are causally bound to the browse generation
+    // the sender observed. Across a close→reopen boundary they are stale
+    // echoes of the old generation — never the new opener's first seed —
+    // so they must not apply or unlock. The server drops what it can, but
+    // a frame relayed just before the boundary can still arrive after the
+    // new-generation STATE; only this receiver-side check closes that race.
+    // Untagged frames (legacy/mixed peers) cannot be verified and pass.
+    var gen = (msg && typeof msg.browseGeneration === 'number' &&
+               isFinite(msg.browseGeneration) && msg.browseGeneration > 0)
+      ? msg.browseGeneration : null;
+    if (gen !== null && gen !== _browseGeneration) return;
+    _applyRemote(msg);
   }
 
   /* ── 送信 ── */
@@ -322,7 +335,7 @@
 
   function _payload() {
     var sc = _scroller();
-    return {
+    var p = {
       view: 'browse',
       path: _w().currentBrowsePath || null,
       top: sc.scrollTop,
@@ -330,6 +343,13 @@
       scrollH: _canRatio() ? sc.scrollHeight : undefined,
       mode: _w().viewMode || 'tile',
     };
+    // Member-drive generations tag their mirror traffic so the server and
+    // the receiver can drop frames that cross a close→reopen boundary —
+    // without the tag an in-flight echo of the old generation is
+    // indistinguishable from the new opener's first seed. Legacy mode has
+    // no generations, so nothing is tagged there.
+    if (_browseGeneration !== null) p.browseGeneration = _browseGeneration;
+    return p;
   }
 
   function _sigOf(p) {
@@ -1077,6 +1097,7 @@
         if (_trace) _trace.length = 0;
       },
       applyRemote: _applyRemote,
+      ctlEvent: _onCtlEvent,
       onState: _onCtlState,
     };
   }

@@ -366,7 +366,7 @@ REJECT フレームの `reason` は以下の enum。実装間で文字列一致�
 | type | 用途 | 規則 |
 |---|---|---|
 | SIGNAL | WebRTC offer/answer/ice 中継 | シーケンスしない。dc ネゴシエーション専用 |
-| UI_SYNC | browse 画面ミラー (scroll progress 等) | ephemeral。reader state 混入禁止。shared browse open 中のみ relay。1s レート窓 |
+| UI_SYNC | browse 画面ミラー (scroll progress 等) | ephemeral。reader state 混入禁止。shared browse open 中のみ relay。1s レート窓。payload は additive に `browseGeneration`（送信者が観測した generation、member-drive のみ）を載せうる — server は現行 generation と不一致なら relay せず drop、受信側も不一致なら drop する。close→reopen の境界を跨いだ in-flight frame が新 generation を汚染するのを防ぐ。タグなし frame（legacy/mixed peer）は検証不能のため従来通り relay される |
 | PING/PONG | keepalive | シーケンスしない |
 | TRANSPORT_STATE | dc up/down 報告 | メンバー dc_state の更新 |
 
