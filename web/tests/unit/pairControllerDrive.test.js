@@ -64,4 +64,18 @@ describe('pairController drive authority and echo-hold decisions', () => {
     // legacy leader holds regardless of bits — the role itself is the authority.
     expect(seam.mayHoldSharedBrowseEcho('leader', false, 'member', false, false)).toBe(true);
   });
+
+  it('absent trust keeps the legacy leader echo-hold (old pairClient mixed shell)', () => {
+    // A pre-trust server never emits trust and an old pairClient never infers
+    // it — the legacy leader must still hold no-op echoes. Only an explicit
+    // guest is denied.
+    expect(seam.mayHoldSharedBrowseEcho('leader', false, undefined, true, false)).toBe(true);
+    expect(seam.mayHoldSharedBrowseEcho('leader', false, null, true, false)).toBe(true);
+    expect(seam.mayHoldSharedBrowseEcho('leader', false, 'member', true, false)).toBe(true);
+    expect(seam.mayHoldSharedBrowseEcho('leader', false, 'guest', true, false)).toBe(false);
+    expect(seam.mayHoldSharedBrowseEcho('follower', false, undefined, true, false)).toBe(false);
+    // member-drive mode: absent trust does not block the hold either.
+    expect(seam.mayHoldSharedBrowseEcho('follower', true, undefined, true, false)).toBe(true);
+    expect(seam.mayHoldSharedBrowseEcho('follower', true, 'guest', true, false)).toBe(false);
+  });
 });

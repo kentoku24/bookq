@@ -139,7 +139,12 @@
    * close, so it cannot outlive the shared browse itself. Guests never
    * hold that echo. */
   function _mayHoldSharedBrowseEcho(localRole, memberDrive, trust, browseOpen, selIssued) {
-    if (trust !== 'member') return false;
+    // Only an explicit guest is denied. A pre-trust server never emits trust
+    // and an old pairClient never infers it, so absent trust is the legacy
+    // case where every member was full — treating it as guest denial would
+    // strip the legacy leader of echo-holding in the mixed-shell direction
+    // (new controller + old pairClient).
+    if (trust === 'guest') return false;
     if (memberDrive === true) return browseOpen === true || selIssued === true;
     return localRole === 'leader';
   }

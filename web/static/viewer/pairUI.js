@@ -496,7 +496,13 @@
         // 作品変更 is leader-only in legacy mixed pairs. When the server's
         // member-drive capability intersection is present, either member
         // trust=member may drive; guests never see an enabled control.
-        var canDriveWork = s.canDrive === true;
+        // The fallback mirrors pairController's _driveAllowed: an explicit
+        // boolean canDrive is authoritative, but a pre-trust pairClient has
+        // no such field at all — undefined means the legacy surface, whose
+        // authority is role-based. Hiding the control there would strand a
+        // legacy leader behind a missing field.
+        var canDriveWork = typeof s.canDrive === 'boolean'
+          ? s.canDrive : s.role === 'leader';
         els.changeWork.hidden = !canDriveWork;
         els.changeWork.disabled = !canDriveWork;
       } else if (sec === els.secError) {
