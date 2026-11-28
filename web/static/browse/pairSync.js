@@ -137,8 +137,18 @@
    * arming there would both accept frames for a closed browse and consume
    * the arm edge before the real open. Legacy/mixed pairs have no orthogonal
    * browse flag, so they keep the phase-only behavior. */
+  /* Initial work-picking before the first commit: no manifest exists, so
+   * there is no shared browse to open and no generation encoding — mirror
+   * traffic in this window is the casual picking mirror (the picking process
+   * itself is shared, by product decision) and follows legacy role-based
+   * semantics in every pair, member-drive or not. */
+  function _preCommit(st) {
+    return !!(st && st.phase === 'selecting' && !st.spreadId);
+  }
+
   function _armEligible(st) {
     if (!_live(st) || !_paired(st) || st.phase !== 'selecting') return false;
+    if (_preCommit(st)) return true;
     // The explicit browse encoding is authoritative whenever this client can
     // see it: in member-drive mode from the first open, and in any pair once
     // a closed generation is being advertised. Mixed/legacy open frames still
@@ -210,7 +220,12 @@
     // sides after simultaneous opens and makes an offline close→reopen keep
     // a stale seed. Legacy pairs have no opener field and remain fixed-role.
     _browseOpenerId = st.browseOpener || null;
-    var initiator = st.memberDrive === true
+    // Pre-commit picking has no opener — the shared browse does not exist
+    // yet — so initiation falls back to the legacy role rule even in a
+    // member-drive pair. Once a work commits the pair disarms, and any
+    // later selecting phase is the explicit re-picking flow where the
+    // server-serialized opener is authoritative again.
+    var initiator = (st.memberDrive === true && !_preCommit(st))
       ? (_browseOpenerId !== null && _browseOpenerId === st.memberId)
       : st.role === 'leader';
     if (initiator) {
@@ -318,7 +333,6 @@
     // so they must not apply or unlock. The server drops what it can, but
     // a frame relayed just before the boundary can still arrive after the
     // new-generation STATE; only this receiver-side check closes that race.
-    // Untagged frames (legacy/mixed peers) cannot be verified and pass.
     if (_foreignGeneration(msg)) return;
     _applyRemote(msg);
   }
@@ -333,10 +347,16 @@
 
   /* A verifiably-tagged frame whose generation is not the one this client
    * currently observes belongs to a dead generation: it must neither apply
-   * nor unlock. Untagged frames cannot be verified and pass. */
+   * nor unlock. Untagged frames pass only while the pair genuinely cannot
+   * tag: once this client observes both the member-drive intersection and a
+   * live generation, every peer is running a build that tags, so an untagged
+   * frame can only be a pre-upgrade straggler — the exact in-flight
+   * pollution the generation exists to prevent. Pre-commit picking mirrors
+   * have no generation at all (_browseGeneration stays null) and pass. */
   function _foreignGeneration(msg) {
     var gen = _msgGeneration(msg);
-    return gen !== null && gen !== _browseGeneration;
+    if (gen !== null) return gen !== _browseGeneration;
+    return _memberDriveActive === true && _browseGeneration !== null;
   }
 
   /* ── 送信 ── */

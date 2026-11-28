@@ -10,6 +10,10 @@ describe('pairSync browse generations', () => {
   function state(over) {
     return Object.assign({
       sessionId: 's1', status: 'active', phase: 'selecting',
+      // These scenarios are post-commit re-picking flows: a committed work
+      // exists, so spreadId is set. (Pre-first-commit picking — selecting
+      // without spreadId — is the casual picking mirror instead.)
+      spreadId: 'c0:s0',
       role: 'follower', memberId: 'm-follower',
       memberDrive: true, browse: true, browseGeneration: 1,
       browseOpener: 'm-follower', browseOpenerRole: 'follower',
@@ -83,9 +87,11 @@ describe('pairSync browse generations', () => {
     hook.flush();   // bypass the send throttle; only the unlock gate may stop it
     expect(sendUiSync).not.toHaveBeenCalled();
 
-    // The opener's first frame unlocks this follower. A subsequent local
-    // scroll is the behavior that proves sending resumed.
-    hook.applyRemote({view: 'browse', path: null, top: 0, viewH: 100, mode: 'tile'});
+    // The opener's first frame unlocks this follower. Member-drive opener
+    // frames are always generation-tagged. A subsequent local scroll is the
+    // behavior that proves sending resumed.
+    hook.applyRemote({view: 'browse', path: null, top: 0, viewH: 100, mode: 'tile',
+                      browseGeneration: 2});
     localScroll(42);
     hook.flush();   // deterministic edge of the normal send throttle
     expect(sendUiSync).toHaveBeenCalledTimes(1);
@@ -131,7 +137,8 @@ describe('pairSync browse generations', () => {
       browseGeneration: 2,
       browseOpener: 'm-leader', browseOpenerRole: 'leader',
     }));
-    hook.applyRemote({view: 'browse', path: null, top: 0, viewH: 100, mode: 'tile'});
+    hook.applyRemote({view: 'browse', path: null, top: 0, viewH: 100, mode: 'tile',
+                      browseGeneration: 2});
     localScroll(42);
     hook.flush();
     expect(sendUiSync).toHaveBeenCalledTimes(1);
@@ -171,7 +178,9 @@ describe('pairSync browse generations', () => {
     hook.flush();
     expect(sendUiSync).toHaveBeenCalledTimes(1);
 
-    // Untagged frames (legacy/mixed peer) cannot be verified and pass through.
+    // Untagged frames in a fully-capable pair with a live generation are
+    // pre-upgrade stragglers, not legitimate traffic — they are dropped
+    // fail-closed and must not unlock either.
     hook.reset();
     sendUiSync.mockClear();
     drive(state({
@@ -182,7 +191,83 @@ describe('pairSync browse generations', () => {
     hook.ctlEvent({type: 'ui-sync', payload: {
       view: 'browse', path: null, top: 20, viewH: 100, mode: 'tile',
     }});
+    expect(hook.unlocked).toBe(false);
+    localScroll(30);
+    hook.flush();
+    expect(sendUiSync).not.toHaveBeenCalled();
+
+    // In a genuinely mixed/legacy pair (no member-drive intersection) the
+    // same untagged frame is unverifiable legacy traffic and passes.
+    hook.reset();
+    sendUiSync.mockClear();
+    drive(state({
+      memberDrive: false, browse: undefined, browseGeneration: undefined,
+      browseOpener: undefined, browseOpenerRole: undefined,
+      role: 'follower', spreadId: 'c0:s0',
+    }));
+    drive(state({
+      memberDrive: false, browse: undefined, browseGeneration: undefined,
+      browseOpener: undefined, browseOpenerRole: undefined,
+      role: 'follower', spreadId: 'c0:s0',
+    }));
+    hook.ctlEvent({type: 'ui-sync', payload: {
+      view: 'browse', path: null, top: 20, viewH: 100, mode: 'tile',
+    }});
     expect(hook.unlocked).toBe(true);
+  });
+
+  it('point-of-effect: applyRemote itself refuses foreign-tagged frames', () => {
+    // Mutation-killing coverage for the guard at the top of _applyRemote:
+    // bypass the receipt-time check entirely by driving the apply seam
+    // directly — without the point-of-effect revalidation this would apply
+    // and unlock.
+    drive(state({
+      browseGeneration: 2,
+      browseOpener: 'm-leader', browseOpenerRole: 'leader',
+    }));
+    expect(hook.unlocked).toBe(false);
+    hook.applyRemote({view: 'browse', path: null, top: 40, viewH: 100, mode: 'tile',
+                      browseGeneration: 1});
+    expect(hook.unlocked).toBe(false);
+    localScroll(30);
+    hook.flush();
+    expect(sendUiSync).not.toHaveBeenCalled();
+    // The correctly-tagged frame through the same seam does unlock.
+    hook.applyRemote({view: 'browse', path: null, top: 40, viewH: 100, mode: 'tile',
+                      browseGeneration: 2});
+    expect(hook.unlocked).toBe(true);
+  });
+
+  it('arms the casual picking mirror pre-commit even in member-drive pairs', () => {
+    // Pre-first-commit: selecting without spreadId. The picking process
+    // itself is shared — the leader mirrors immediately by the legacy role
+    // rule even though member-drive would otherwise require browse===true.
+    drive(state({
+      role: 'leader', memberId: 'm-leader',
+      spreadId: null,
+      browse: false, browseGeneration: 0,
+      browseOpener: null, browseOpenerRole: null,
+    }));
+    // Arming seeds immediately — the leader is the initiator by role.
+    expect(sendUiSync).toHaveBeenCalledTimes(1);
+    // No generation exists pre-commit, so the frame is untagged.
+    expect(sentPayloads()[0].browseGeneration).toBeUndefined();
+    localScroll(30);
+    hook.flush();
+    expect(sendUiSync).toHaveBeenCalledTimes(2);
+  });
+
+  it('post-commit re-picking stays strict: no arm without browse open in member-drive', () => {
+    // Same selecting phase but with a committed work (spreadId set) and no
+    // open browse: the member-drive strict rule applies and nothing arms.
+    drive(state({
+      role: 'leader', memberId: 'm-leader',
+      browse: false, browseGeneration: 0,
+      browseOpener: null, browseOpenerRole: null,
+    }));
+    localScroll(30);
+    hook.flush();
+    expect(sendUiSync).not.toHaveBeenCalled();
   });
 
   it('treats generation emergence while continuously armed as a boundary', () => {

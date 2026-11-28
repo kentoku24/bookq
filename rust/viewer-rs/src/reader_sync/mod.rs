@@ -2120,10 +2120,21 @@ impl Inner {
         // that would make the receiver open its list. Nobody — member or
         // guest — may start the shared browse merely by emitting mirror
         // traffic. Participants may relay only after an authorized member
-        // opened it through SET_ACTIVITY. The initial pre-commit phase is
-        // `selecting` without the shared browse flag being open, so the
-        // boolean (not the derived phase) is the authority here.
-        let starting_closed_browse = !self.session(sid).is_some_and(|s| s.browse_open);
+        // opened it through SET_ACTIVITY.
+        //
+        // Exception: before the first work commit there is no shared browse
+        // to open — mirror traffic in that window is the casual
+        // work-picking mirror (product decision: the picking process itself
+        // is shared). It carries no position in any work and cannot open
+        // anything, so it relays exactly as it did before the shared-browse
+        // encoding existed. Once a manifest exists, the strict gate applies:
+        // the explicit-open flow (作品変更) is the only way mirror traffic
+        // is allowed, and the initial pre-commit phase being `selecting`
+        // does not count — the boolean (not the derived phase) is the
+        // authority there.
+        let pre_commit = self.session(sid).is_some_and(|s| s.manifest.is_none());
+        let starting_closed_browse =
+            !pre_commit && !self.session(sid).is_some_and(|s| s.browse_open);
         if starting_closed_browse {
             self.reject(
                 link_id,
@@ -2141,14 +2152,27 @@ impl Inner {
         // generation — the receiver has no other way to tell it apart from
         // the new opener's first seed. Ephemeral traffic is dropped, not
         // rejected: a generation skew is a race outcome, not an error.
-        // Frames without the field (legacy/mixed clients) relay as before.
-        if let Some(gen) = req["payload"]
-            .get("browseGeneration")
-            .and_then(|v| v.as_i64())
-        {
-            let current = self.session(sid).map(|s| s.browse_generation);
-            if current != Some(gen) {
-                return;
+        // Frames without the field relay only while the pair cannot tag:
+        // once the member-drive intersection is established every participant
+        // is running a build that tags, so an untagged frame can only be a
+        // pre-upgrade straggler — exactly the in-flight pollution the
+        // generation exists to prevent — and is dropped like a mismatch.
+        // Pre-commit picking mirrors have no generations at all and pass
+        // either way (the current generation is 0 there).
+        let intersection = self
+            .session(sid)
+            .is_some_and(|s| self.member_drive_intersection(s));
+        match req["payload"].get("browseGeneration").and_then(|v| v.as_i64()) {
+            Some(gen) => {
+                let current = self.session(sid).map(|s| s.browse_generation);
+                if current != Some(gen) {
+                    return;
+                }
+            }
+            None => {
+                if intersection && self.session(sid).is_some_and(|s| s.browse_open) {
+                    return;
+                }
             }
         }
         let other_link = self.session(sid).and_then(|s| {
@@ -2279,7 +2303,7 @@ impl Inner {
             let load_op = s
                 .dedup
                 .get(&oldest)
-                .is_some_and(dedup_frame_is_load);
+                .is_some_and(dedup_frame_needs_cross_epoch_tombstone);
             s.dedup.remove(&oldest);
             dedup_tombstone(s, oldest, load_op);
         }
@@ -2828,12 +2852,13 @@ impl Inner {
             // retention field being populated.
             // The trigger is the request whose resolution committed this
             // epoch — whatever op started the job (OPEN_WORK or SET_OFFSET).
-            // This is deliberately NOT dedup_frame_is_load: that predicate
+            // This is deliberately NOT dedup_frame_needs_cross_epoch_tombstone: that predicate
             // scopes cross-epoch tombstone protection to OPEN_WORK (the only
             // epoch-gate-exempt op), while the carry must cover the job kind
             // that actually triggered the rollover. A SET_OFFSET load ACK
             // must ride the epoch too, or its resend is answered
-            // stale_request instead of the identical ACK.
+            // stale_request (evicted pre-commit) or stale_epoch (dropped at
+            // the rollover) instead of the identical ACK.
             let valid_trigger = |frame: &Value| {
                 frame
                     .get("request")
@@ -2854,7 +2879,7 @@ impl Inner {
                 let Some(frame) = s.dedup.get(key) else {
                     continue;
                 };
-                let is_load = dedup_frame_is_load(frame);
+                let is_load = dedup_frame_needs_cross_epoch_tombstone(frame);
                 let is_trigger_ack = *key == carry_key && valid_trigger(frame);
                 if is_trigger_ack {
                     if carried.is_none() {
@@ -3278,7 +3303,7 @@ impl Inner {
     }
 }
 
-fn dedup_frame_is_load(frame: &Value) -> bool {
+fn dedup_frame_needs_cross_epoch_tombstone(frame: &Value) -> bool {
     // OPEN_WORK is the one op that skips the epoch/manifestVersion/base
     // gates (see sequenced_op), so it is the only op whose replay needs
     // tombstone protection past an epoch rollover. SET_OFFSET replays are

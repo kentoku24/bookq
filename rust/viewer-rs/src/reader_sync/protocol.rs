@@ -405,7 +405,11 @@ fn validate_ui_sync(p: &Map<String, Value>) -> Result<(), ProtocolError> {
     // untagged (which bypasses both generation drop checks as if the peer
     // were legacy).
     if let Some(bg) = p.get("browseGeneration") {
-        if !bg.is_null() && !bg.as_i64().is_some_and(|v| v >= 1) {
+        // Present-null is malformed too: the schema types the field as a
+        // non-nullable integer, and silently treating null as absent would
+        // degrade a client that tried to tag into an untagged legacy peer,
+        // bypassing both generation drop checks.
+        if bg.is_null() || !bg.as_i64().is_some_and(|v| v >= 1) {
             return fail(
                 ERR_RANGE,
                 "UI_SYNC.browseGeneration must be int >= 1 when present",

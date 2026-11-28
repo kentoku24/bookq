@@ -4564,7 +4564,7 @@
   },
   {
    "id": "ui_sync_browse_gate_and_generation_relay",
-   "title": "UI_SYNC: closed browse rejects; open browse relays verbatim to peer only; generation mismatch drops; malformed tag is malformed",
+   "title": "UI_SYNC: closed browse rejects; untagged drops once the member-drive intersection is established; matching generation relays; mismatch drops; malformed/null tags are malformed",
    "setup": "reading",
    "resolver": "work",
    "features": {
@@ -4716,21 +4716,7 @@
     {
      "op": "expect",
      "link": "L2",
-     "frames": [
-      {
-       "v": 1,
-       "type": "UI_SYNC",
-       "sessionId": "@session",
-       "from": "leader",
-       "payload": {
-        "view": "browse",
-        "path": null,
-        "top": 42,
-        "viewH": 100,
-        "mode": "tile"
-       }
-      }
-     ]
+     "frames": []
     },
     {
      "op": "send",
@@ -4845,6 +4831,146 @@
      "op": "expect",
      "link": "L2",
      "frames": []
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "um2",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 7,
+      "type": "UI_SYNC",
+      "payload": {
+       "view": "browse",
+       "path": null,
+       "top": 10,
+       "viewH": 100,
+       "mode": "tile",
+       "browseGeneration": null
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "REJECT",
+       "requestId": "um2",
+       "request": "UI_SYNC",
+       "reason": "malformed",
+       "sessionId": null
+      }
+     ]
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": []
+    }
+   ]
+  },
+  {
+   "id": "ui_sync_pre_commit_picking_mirror_relays",
+   "title": "UI_SYNC before the first work commit: the picking mirror relays in both directions even though no shared browse is open",
+   "setup": "pairing",
+   "features": {
+    "L1": [
+     "member-drive-v1"
+    ],
+    "L2": [
+     "member-drive-v1"
+    ]
+   },
+   "steps": [
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "pc1",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 2,
+      "type": "UI_SYNC",
+      "payload": {
+       "view": "browse",
+       "path": null,
+       "top": 30,
+       "viewH": 100,
+       "mode": "tile"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": []
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": [
+      {
+       "v": 1,
+       "type": "UI_SYNC",
+       "sessionId": "@session",
+       "from": "leader",
+       "payload": {
+        "view": "browse",
+        "path": null,
+        "top": 30,
+        "viewH": 100,
+        "mode": "tile"
+       }
+      }
+     ]
+    },
+    {
+     "op": "send",
+     "link": "L2",
+     "frame": {
+      "v": 1,
+      "requestId": "pc2",
+      "sessionId": "@session",
+      "workEpoch": 0,
+      "baseRevision": 2,
+      "type": "UI_SYNC",
+      "payload": {
+       "view": "browse",
+       "path": null,
+       "top": 55,
+       "viewH": 100,
+       "mode": "tile"
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "link": "L2",
+     "frames": []
+    },
+    {
+     "op": "expect",
+     "link": "L1",
+     "frames": [
+      {
+       "v": 1,
+       "type": "UI_SYNC",
+       "sessionId": "@session",
+       "from": "follower",
+       "payload": {
+        "view": "browse",
+        "path": null,
+        "top": 55,
+        "viewH": 100,
+        "mode": "tile"
+       }
+      }
+     ]
     }
    ]
   }
