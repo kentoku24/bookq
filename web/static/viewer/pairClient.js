@@ -2299,6 +2299,12 @@
   // pairClient.js が残った混在シェルを pairSync 側が検出し、双方向とも
   // legacy px 変換に倒せるようにする。index.html の watchdog 必須 marker。
   globalThis.BOOKQ_UI_SYNC_V2 = true;
+  // browseGeneration forwarding support: sendUiSync passes valid positive
+  // integer generation tags through to the wire instead of stripping them.
+  // member-drive advertised without this property silently drops the
+  // client's own frames server-side during explicit open sessions, so the
+  // composition gate requires it. index.html watchdog 必須 marker。
+  globalThis.BOOKQ_PAIR_CLIENT_API = 2;
 
   /* Cheap boot check (pairController): does a dead owner's persisted
    * resume record sit inside the resume window? Same staleness rule as

@@ -1171,6 +1171,14 @@
     sidebar.classList.remove("open"); viewer.classList.remove("sidebar-open"); hideResumeBtn(); closeHeaderMenu({focus:false}); syncSidebarA11y();
   }
   try { window.closeSidebar = closeSidebar; window.setInert = setInert; window.syncSidebarA11y = syncSidebarA11y; } catch(e) { console.warn(e); }
+  // Versioned close-intent API: closeSidebar(opts) writes the
+  // __bookqSidebarCloseIntent marker distinguishing explicit user closes
+  // from programmatic ones. member-drive close semantics (endBrowse on
+  // explicit user close) cannot be implemented without it, so
+  // pairController requires this marker before advertising member-drive —
+  // a legacy SWR-cached app.js must fail the composition closed.
+  // index.html watchdog 必須 marker。
+  try { window.BOOKQ_SIDEBAR_CLOSE_API = 1; } catch(e) { console.warn(e); }
   // The visual side of opening the drawer — shared with browse/pairSync.js
   // (paired scroll-mirror opens the follower's sidebar without a nav intent).
   function openSidebar(){

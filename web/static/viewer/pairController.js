@@ -215,6 +215,13 @@
       var st = _client ? _client.state : null;
       if (!_memberBound(st) || !_paired(st)) return;
       if (open) {
+        // A mirror-initiated programmatic open (the peer's frame auto-opened
+        // this sidebar) is not the user foregrounding shared selection —
+        // ephemeral receipt must not leak into the control plane as a
+        // SET_ACTIVITY open, or a casual mirror frame could flip the pair
+        // into explicit shared browse. Marker set by pairSync before opening.
+        var openIntent = window.__bookqSidebarOpenIntent;
+        if (openIntent && openIntent.programmatic) return;
         var mayOpen = _driveAllowed(st);
         var wireOpen = st.memberDrive === true
           ? st.browse === true
@@ -597,7 +604,18 @@
 
   function _pairSyncSupportsMemberDrive() {
     try {
-      return window.BOOKQ_BROWSE_SYNC_API >= 2;
+      // member-drive is a composition property, not a pairSync property:
+      // - pairSync (API>=2) understands generation/open-close semantics;
+      // - app.js close API emits the close-intent marker — without it an
+      //   explicit user close is indistinguishable from a programmatic one,
+      //   endBrowse never emits, and shared browse wedges open server-side;
+      // - pairClient (API>=2) forwards browseGeneration — without it the
+      //   client's own frames drop server-side during explicit opens.
+      // Any SWR-stale component fails the whole composition closed into
+      // legacy leader-drive semantics.
+      return window.BOOKQ_BROWSE_SYNC_API >= 2 &&
+        window.BOOKQ_SIDEBAR_CLOSE_API >= 1 &&
+        window.BOOKQ_PAIR_CLIENT_API >= 2;
     } catch (e) {
       return false;
     }

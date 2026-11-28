@@ -3,9 +3,12 @@
  * （実行時はすべて window.* 経由の遅延解決なので、DOMContentLoaded で init する）。
  *
  * 何をするか:
- *   leader がブラウズ一覧（#sidebar-scroll / #tile-grid）を開くと pair の phase が
- *   'selecting' になる（pairController の sidebar observer → SET_ACTIVITY）。
- *   armed = live pair && phase==='selecting' の間、自分の {path, scrollTop,
+ *   tile browsing は常に共有される（プロダクト判断 — 初回 picking も
+ *   作品を閉じた後の物色も同じ行為）。armed = live pair の全期間で、
+ *   phase や commit 状態に依らない。arming は送信権ではなく受信資格:
+ *   送信は send gate（local sidebar 開 + unlock + query sort 非活性）を
+ *   通る frame だけなので、閲覧中に送信で邪魔されることはない。
+ *   自分の {path, scrollTop,
  *   clientHeight, scrollHeight, viewMode} を ephemeral frame UI_SYNC で
  *   peer へ中継する。受信側は不変式「peer のスクロール進捗 = 自分の
  *   スクロール進捗」で scrollTop を導く（双方向とも同じ式）:
@@ -46,8 +49,10 @@
  *   seq は持たない。
  *
  *   follower のミラー sidebar は最初の有効 frame で自動的に開き、disarm
- *   （phase 離脱 / session 終了）で自分が開いた分だけ畳む。armed 中に
- *   ユーザーが閉じた場合はその arm 期間中は開き直さない（_userClosed）。
+ *   （session 終了 / pair 切断）で自分が開いた分だけ畳む。armed 中に
+ *   ユーザーが明示的に閉じた場合はその arm 期間中は開き直さない
+ *   （_userClosed — closeSidebar の intent marker で区別し、
+ *   プログラム close は suppression しない）。
  *
  *   echo/逆変換の保護:
  *   - remote 適用直後 SUPPRESS_MS 間は scroll send を窓明けへ defer する
@@ -131,28 +136,13 @@
     return !!st && !!st.sessionId && st.status !== 'idle' &&
       st.status !== 'ended' && st.status !== 'error';
   }
-  /* Mirror eligibility is the shared-browse activity, not merely the derived
-   * phase. In a member-drive pair with no committed work the phase is
-   * 'selecting' even while browse is still closed (作品未選択の初期状態) —
-   * arming there would both accept frames for a closed browse and consume
-   * the arm edge before the real open. Legacy/mixed pairs have no orthogonal
-   * browse flag, so they keep the phase-only behavior. */
-  /* Initial work-picking before the first commit: no manifest exists, so
-   * there is no shared browse to open and no generation encoding — mirror
-   * traffic in this window is the casual picking mirror (the picking process
-   * itself is shared, by product decision) and follows legacy role-based
-   * semantics in every pair, member-drive or not. */
-  function _preCommit(st) {
-    return !!(st && st.phase === 'selecting' && !st.spreadId);
-  }
-
   function _armEligible(st) {
     if (!_live(st) || !_paired(st)) return false;
     // Tile browsing is always shared (product decision, restoring legacy):
     // the mirror arms for the whole paired lifetime regardless of commit
-    // state or phase. Arming alone emits nothing — the send gate requires
-    // the local sidebar to be open, so frames only flow when this user is
-    // actually interacting with the tile view, exactly as legacy behaved.
+    // state or phase. Arming does not open the sidebar or bypass the send
+    // gate — it only makes the client eligible to receive, and to send when
+    // the local sidebar is open, unlocked, and not query-sorted.
     return true;
   }
   function _presenceSig(st) {
@@ -216,22 +206,37 @@
     // sides after simultaneous opens and makes an offline close→reopen keep
     // a stale seed. Legacy pairs have no opener field and remain fixed-role.
     _browseOpenerId = st.browseOpener || null;
-    // The opener rule is keyed on the explicit shared-browse open, not on
-    // the commit boundary: a member can open shared browse BEFORE the first
-    // work commit (initial shared work selection), and the server serializes
-    // an opener and a generation there exactly as it does post-commit — the
-    // pre-commit state only means the CASUAL mirror is in effect while no
-    // shared browse is open. Keying on _preCommit instead mis-elected the
-    // leader by role when the follower had explicitly opened: the opener
+    // The opener rule is keyed on the explicit shared-browse open: whenever
+    // a member-drive pair has shared browse open, the server serializes an
+    // opener and a generation, and only that opener seeds. Everything else —
+    // legacy/mixed pairs, and all tile browsing with no explicit open
+    // (initial picking and post-commit browsing alike, since tile browsing
+    // is always shared) — is casual mirror traffic that falls back to the
+    // legacy role rule. Keying on the commit boundary instead mis-elected
+    // the leader by role when the follower had explicitly opened: the opener
     // stayed locked (never seeded) while the role-initiator's sidebar could
     // be closed (never sends) — a deadlock where no mirror frame ever left
-    // either side and the peer list never opened. The casual role rule now
-    // covers exactly the cases it always did: legacy/mixed pairs, and the
-    // pre-commit picking window with no shared browse open.
+    // either side and the peer list never opened.
     var explicitOpen = st.memberDrive === true && st.browse === true;
-    var initiator = explicitOpen
-      ? (_browseOpenerId !== null && _browseOpenerId === st.memberId)
-      : st.role === 'leader';
+    var initiator;
+    if (explicitOpen) {
+      initiator = _browseOpenerId !== null && _browseOpenerId === st.memberId;
+    } else if (st.memberDrive === true) {
+      // Casual member-drive picking is symmetric: the lock exists for
+      // opener arbitration inside an explicit generation, but casual tile
+      // browsing has no seed to arbitrate — whoever browses first shares,
+      // exactly as the product decision requires. Electing only the leader
+      // here deadlocked follower-initiated picking whenever the leader was
+      // inactive: the follower stayed locked, the only unlock path being a
+      // remote frame the inactive leader never emitted. Initial seeds
+      // cannot fight because both launchers start at the same position,
+      // and echo suppression settles later crossings last-writer-wins.
+      initiator = true;
+    } else {
+      // Legacy/mixed pairs keep the fixed-role asymmetry: the leader drives,
+      // the follower watches — including the leader not auto-opening.
+      initiator = st.role === 'leader';
+    }
     if (initiator) {
       _unlocked = true;
       _lastSentSig = null;
@@ -785,6 +790,17 @@
     var fixedRoles = !(st && st.memberDrive === true);
     if (_userClosed || (fixedRoles && _role() === 'leader') ||
         _sidebarOpen()) return;
+    // A mirror-initiated open is not a user open: mark it so pairController
+    // does not turn passive receipt into a control-plane SET_ACTIVITY open.
+    // Ephemeral frame receipt must never foreground the shared-selection
+    // activity by itself — the user joining the tiles is what does that.
+    var token = {programmatic: true, at: Date.now()};
+    window.__bookqSidebarOpenIntent = token;
+    setTimeout(function () {
+      if (window.__bookqSidebarOpenIntent === token) {
+        delete window.__bookqSidebarOpenIntent;
+      }
+    }, 0);
     try {
       // 正規の open 経路（app.js toggleSidebar と同じ visual open）を共有 —
       // 手書き class 付与だと tile-full 等のレイアウトが欠けて scrollHeight
@@ -1029,10 +1045,14 @@
       }
       var sb = _sidebar();
       if (sb) {
-        // armed 中にミラー sidebar が閉じられた = ユーザーが自分で閉じた
-        // （このモジュールが閉じるのは disarm のみで、その時点では
-        // _armed=false）。次の受信 frame で開き直すとちらつくので、その
-        // arm 期間中は開き直さない。
+        // armed 中にミラー sidebar が「ユーザー操作で」閉じられた場合のみ
+        // 開き直さない — closeSidebar の intent marker で区別する。
+        // プログラム close（work commit・wire browse close・reader 復帰）は
+        // ユーザー意思ではない: arm が pair lifetime になった今、それを
+        // user close と誤記憶すると以後の casual mirror frame が永遠に
+        // auto-open しなくなる。open 遷移は常に suppression を解く。
+        // marker は closeSidebar が microtask 前にセットし macrotask で
+        // 消すため、MutationObserver(microtask) では必ず読める。
         var wasOpen = sb.classList.contains('open');
         try {
           new MutationObserver(function () {
@@ -1040,11 +1060,18 @@
             if (open === wasOpen) return;
             wasOpen = open;
             if (!_armed) return;
-            _userClosed = !open;
-            if (!open) {
-              _resetFollow();
-              _releaseInput();
+            if (open) {
+              _userClosed = false;
+              return;
             }
+            var intent = window.__bookqSidebarCloseIntent;
+            _userClosed = !!(intent && intent.explicit);
+            // mirror が開いた sidebar が何らかの close で閉じられた時点で
+            // ownership は消費済み — 後でユーザーが手動で開き直しても
+            // disarm 時にモジュールが閉じてはいけない。
+            _mirrorOpened = false;
+            _resetFollow();
+            _releaseInput();
           }).observe(sb, {attributes: true, attributeFilter: ['class']});
         } catch (e) { console.warn(e); }
       }
