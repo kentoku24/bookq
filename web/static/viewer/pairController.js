@@ -105,6 +105,19 @@
 
   /* ── committed-state sink ── */
 
+  /* Drive authority for this client/mode. The new client surface exposes
+   * `canDrive` (trust-aware). A pre-trust pairClient (stale SWR shell or a
+   * rolled-back server that never emits trust) has no such field —
+   * `undefined` there means the legacy surface, whose authority is purely
+   * role-based, so fall back to `role === 'leader'` rather than dead-ending
+   * every drive action or bailing picks to solo. An explicit boolean
+   * `false` is the new client genuinely denying drive and never falls back. */
+  function _driveAllowed(st) {
+    if (!st) return false;
+    if (typeof st.canDrive === 'boolean') return st.canDrive;
+    return st.role === 'leader';
+  }
+
   /* What the display actually shows for a commit — phase/presence flaps
    * (selecting/active/paused activity echoes) don't move it, but a work
    * pick or a remote turn does. */
@@ -190,7 +203,7 @@
       var st = _client ? _client.state : null;
       if (!_memberBound(st) || !_paired(st)) return;
       if (open) {
-        var mayOpen = st.canDrive === true;
+        var mayOpen = _driveAllowed(st);
         var wireOpen = st.memberDrive === true
           ? st.browse === true
           : st.phase === 'selecting';
@@ -234,7 +247,7 @@
         // New close semantics: active/suspended alone never end shared
         // browse. Only an explicit local close gesture carries endBrowse;
         // programmatic closes (mirror disarm, work pick, navigation) do not.
-        if (explicitClose && st.canDrive === true &&
+        if (explicitClose && _driveAllowed(st) &&
             (_selIssued || st.browse === true)) {
           _selIssued = false;
           _client.setActivity('active', {endBrowse: true});
@@ -405,12 +418,12 @@
           _denyHiddenWork();
           return true;
         }
-        if (st.canDrive === true) {
+        if (_driveAllowed(st)) {
           return _driveOpenWork(intent);
         }
         return _bailToSolo(intent);
       case 'browse':
-        if (st.canDrive === true) {
+        if (_driveAllowed(st)) {
           return _driveBrowse(intent.via);
         }
         // Legacy follower browsing is a local look at the list — the pair
@@ -746,7 +759,7 @@
     changeWork: function () {
       var st = _client ? _client.state : null;
       if (!_memberBound(st) ||
-          !(st.canDrive === true)) return false;
+          !(_driveAllowed(st))) return false;
       return _driveBrowse('change-work');
     },
     sendIntent: function (intent) {
@@ -815,6 +828,7 @@
   if (window.__BOOKQ_TEST_MODE__ === 'true') {
     window.__pairCtlTest = {
       applyCommitted: _applyCommitted,
+      driveAllowed: _driveAllowed,
       get pendingCommit() { return _pendingCommit; },
       get heldCommit() { return _heldCommit; },
     };
