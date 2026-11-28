@@ -2127,12 +2127,18 @@ impl Inner {
         // work-picking mirror (product decision: the picking process itself
         // is shared). It carries no position in any work and cannot open
         // anything, so it relays exactly as it did before the shared-browse
-        // encoding existed. Once a manifest exists, the strict gate applies:
-        // the explicit-open flow (作品変更) is the only way mirror traffic
-        // is allowed, and the initial pre-commit phase being `selecting`
-        // does not count — the boolean (not the derived phase) is the
-        // authority there.
-        let pre_commit = self.session(sid).is_some_and(|s| s.manifest.is_none());
+        // encoding existed — for members. A guest's frames still may not
+        // reach the host: the picking share is a member affordance, while a
+        // guest watching the owner's picking only ever receives. Once a
+        // manifest exists, the strict gate applies: the explicit-open flow
+        // (作品変更) is the only way mirror traffic is allowed, and the
+        // initial pre-commit phase being `selecting` does not count — the
+        // boolean (not the derived phase) is the authority there.
+        let pre_commit = self.session(sid).is_some_and(|s| s.manifest.is_none())
+            && self
+                .session(sid)
+                .and_then(|s| s.members.iter().find(|m| m.id == mid))
+                .is_some_and(|m| m.trust != TRUST_GUEST);
         let starting_closed_browse =
             !pre_commit && !self.session(sid).is_some_and(|s| s.browse_open);
         if starting_closed_browse {
@@ -4032,7 +4038,11 @@ mod tests {
                 "member-open",
             ),
         );
-        inner.dispatch(&reg, &l2, &req_named("UI_SYNC", &sid, ui(), "guest-ui-open"));
+        // Both sides advertise member-drive, so legitimate frames are
+        // generation-tagged — an untagged frame would drop as a straggler.
+        let mut tagged = ui();
+        tagged["browseGeneration"] = Value::from(1);
+        inner.dispatch(&reg, &l2, &req_named("UI_SYNC", &sid, tagged, "guest-ui-open"));
         let mut forwarded = false;
         while let Ok(OutItem::Text(raw)) = r1.try_recv() {
             let f: Value = serde_json::from_str(&raw).unwrap();
@@ -4045,7 +4055,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn member_ui_sync_cannot_start_closed_shared_browse() {
+    async fn member_ui_sync_pre_commit_picking_mirror_relays() {
+        // Before the first work commit there is no shared browse to open:
+        // member mirror traffic is the casual picking mirror (the picking
+        // process itself is shared) and relays even though nothing was
+        // opened — exactly as it did before the shared-browse encoding.
         let reg = reg_for_test();
         let mut inner = reg.inner.lock().await;
         let (l1, mut r1) = mk_link(&mut inner);
@@ -4056,6 +4070,7 @@ mod tests {
             &mut inner, &reg, &l1, &mut r1, &l2, &mut r2,
             &[CAP_MEMBER_DRIVE], &[CAP_MEMBER_DRIVE],
         );
+        assert!(inner.session(&sid).unwrap().manifest.is_none());
         let ui = || {
             protocol::frame(&[
                 ("view", "browse".into()),
@@ -4064,19 +4079,23 @@ mod tests {
                 ("viewH", Value::from(600)),
             ])
         };
-        inner.dispatch(&reg, &l2, &req_named("UI_SYNC", &sid, ui(), "member-ui-closed"));
-        let frames: Vec<Value> = std::iter::from_fn(|| match r2.try_recv() {
+        inner.dispatch(&reg, &l2, &req_named("UI_SYNC", &sid, ui(), "member-ui-precommit"));
+        let sender_frames: Vec<Value> = std::iter::from_fn(|| match r2.try_recv() {
             Ok(OutItem::Text(raw)) => serde_json::from_str(&raw).ok(),
             _ => None,
         }).collect();
-        assert!(frames.iter().any(|f| f["type"] == "REJECT"
-            && f["requestId"] == "member-ui-closed"
-            && f["reason"] == REASON_FORBIDDEN));
+        assert!(
+            !sender_frames.iter().any(|f| f["type"] == "REJECT"),
+            "a member picking mirror must not be forbidden: {sender_frames:?}"
+        );
         let leader_frames: Vec<Value> = std::iter::from_fn(|| match r1.try_recv() {
             Ok(OutItem::Text(raw)) => serde_json::from_str(&raw).ok(),
             _ => None,
         }).collect();
-        assert!(!leader_frames.iter().any(|f| f["type"] == "UI_SYNC"));
+        assert!(
+            leader_frames.iter().any(|f| f["type"] == "UI_SYNC"),
+            "the picking mirror must relay to the peer pre-commit: {leader_frames:?}"
+        );
 
         inner.dispatch(
             &reg,
@@ -4088,7 +4107,9 @@ mod tests {
                 "member-open-ui",
             ),
         );
-        inner.dispatch(&reg, &l2, &req_named("UI_SYNC", &sid, ui(), "member-ui-open"));
+        let mut tagged = ui();
+        tagged["browseGeneration"] = Value::from(1);
+        inner.dispatch(&reg, &l2, &req_named("UI_SYNC", &sid, tagged, "member-ui-open"));
         let mut forwarded = false;
         while let Ok(OutItem::Text(raw)) = r1.try_recv() {
             let f: Value = serde_json::from_str(&raw).unwrap();
@@ -4669,15 +4690,17 @@ mod tests {
             "the first closed-to-open transition owns generation 1"
         );
 
-        // Matching generation relays; mismatched drops; untagged relays.
+        // Matching generation relays; mismatched drops. Untagged drops too:
+        // both members advertise member-drive, so every legitimate build
+        // tags — an untagged frame can only be a pre-upgrade straggler.
         inner.dispatch(&reg, &l1, &ui(Some(1)));
         assert_eq!(relayed_gen(&mut r2), Some(1));
         inner.dispatch(&reg, &l1, &ui(Some(99)));
         assert_eq!(relayed_gen(&mut r2), None, "future/stale gen must drop");
         inner.dispatch(&reg, &l1, &ui(None));
         assert!(
-            drain_texts(&mut r2).iter().any(|f| f["type"] == "UI_SYNC"),
-            "untagged (legacy) frames relay as before"
+            !drain_texts(&mut r2).iter().any(|f| f["type"] == "UI_SYNC"),
+            "untagged frames drop once the member-drive intersection holds"
         );
 
         // Close, reopen — generation 2. The old generation is dead on arrival.
