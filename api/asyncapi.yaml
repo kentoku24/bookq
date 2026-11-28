@@ -249,7 +249,12 @@ components:
           type: {type: string, const: ERROR}
           code:
             type: string
-            enum: [ERR_VERSION, ERR_MALFORMED, ERR_TYPE, ERR_RANGE, ERR_SIZE]
+            enum: [not_found, empty_work, broken_archive, page_not_found, no_initial_page, range, size, malformed, timeout, forbidden]
+            description: |
+              session-scoped な load 失敗の理由語彙（manifest error 由来）。
+              ERROR は requestId を持たない uncorrelated な session event であり、
+              frame-level の validation 失敗（ERR_*）は REJECT または close で返り、
+              ERROR frame には乗らない。
           message: {type: string}
 
   schemas:
@@ -264,7 +269,7 @@ components:
       required: [v, requestId, sessionId, workEpoch, baseRevision, type, payload]
       properties:
         v: {type: integer, const: 1}
-        requestId: {type: string, minLength: 1, maxLength: 128}
+        requestId: {type: string, minLength: 1, maxLength: 128, pattern: '^[\x21-\x7e]+$', description: opaque idempotency key。server は 128 bytes (UTF-8) で enforced するため ASCII printable に限定する — maxLength(codepoints) だけでは byte cap を表現できない}
         sessionId: {type: [string, "null"]}
         workEpoch: {type: integer, minimum: 0}
         baseRevision: {type: integer, minimum: 0}

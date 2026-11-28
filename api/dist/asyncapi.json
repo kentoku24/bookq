@@ -162,12 +162,18 @@
         "payload": {
           "properties": {
             "code": {
+              "description": "session-scoped な load 失敗の理由語彙（manifest error 由来）。\nERROR は requestId を持たない uncorrelated な session event であり、\nframe-level の validation 失敗（ERR_*）は REJECT または close で返り、\nERROR frame には乗らない。\n",
               "enum": [
-                "ERR_VERSION",
-                "ERR_MALFORMED",
-                "ERR_TYPE",
-                "ERR_RANGE",
-                "ERR_SIZE"
+                "not_found",
+                "empty_work",
+                "broken_archive",
+                "page_not_found",
+                "no_initial_page",
+                "range",
+                "size",
+                "malformed",
+                "timeout",
+                "forbidden"
               ],
               "type": "string"
             },
@@ -891,8 +897,10 @@
             "type": "object"
           },
           "requestId": {
+            "description": "opaque idempotency key。server は 128 bytes (UTF-8) で enforced するため ASCII printable に限定する — maxLength(codepoints) だけでは byte cap を表現できない",
             "maxLength": 128,
             "minLength": 1,
+            "pattern": "^[\\x21-\\x7e]+$",
             "type": "string"
           },
           "sessionId": {

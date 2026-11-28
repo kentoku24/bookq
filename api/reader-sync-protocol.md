@@ -274,7 +274,19 @@ TURN/GOTO は `reading` でのみ受理:
   load tombstone は専用 budget（`DEDUP_LOAD_TOMBSTONE_MAX`）で管理し、FIFO cap で黙って evict しない。
   budget を超えた場合は session を `dedup_exhausted` で fail-closed 終了する — tombstone を黙って
   捨てると再送が実行可能状態に戻るため、境界を保てない session を生かし続けるより終了を選ぶ。
-  requestId には長さ上限（128 bytes）があり、tombstone のメモリは session あたり hard bound される。
+  requestId には長さ上限（128 bytes — UTF-8 byte 数。schema の maxLength は codepoint 数の近似で、
+  厳密な境界は byte 側）があり、tombstone のメモリは session あたり hard bound される。
+
+### load op の二相 outcome（OPEN_WORK / 非 no-op SET_OFFSET）
+
+load を開始する op の ACK は「解決パイプラインへの受理」の意味であり、作品のロード成功を保証しない。
+解決は非同期で、失敗は session 全体に `ERROR` frame（`code` は `not_found`/`empty_work`/`broken_archive`/
+`page_not_found`/`no_initial_page`/`range`/`size`/`malformed`/`timeout`/`forbidden` の manifest 理由語彙）+
+最新 STATE として broadcast される。`ERROR` は session-scoped で requestId を持たない — client は直後の
+STATE から失敗を推測する。dedup replay は受理 ACK を再生するだけで outcome を証明しない: 同一 requestId の
+再送は load が既に失敗していても受理 ACK を受け取る。success/failure/superseded の意味論は別物であり、
+outcome は STATE/ERROR でのみ観測できる。`ERROR` frame の schema 上の `code` はこの理由語彙であり、
+frame-level の `ERR_*` 語彙（validation 失敗）は ERROR ではなく REJECT/close で返る点に注意。
   なお通常 tombstone（`DEDUP_TOMBSTONE_MAX`）は FIFO で有限であるため、TURN のような relative op は
   attacker による大量の無関係 outcome で victim entry が押し出された後では再送が再実行され得る。
   これは bounded memory とのトレードオフとして意図的に受容する — 有限の冪等性であり、
@@ -370,7 +382,7 @@ REJECT フレームの `reason` は以下の enum。実装間で文字列一致�
 | type | 用途 | 規則 |
 |---|---|---|
 | SIGNAL | WebRTC offer/answer/ice 中継 | シーケンスしない。dc ネゴシエーション専用 |
-| UI_SYNC | browse 画面ミラー (scroll progress 等) | ephemeral。reader state 混入禁止。shared browse open 中のみ relay — これは legacy 挙動からの意図的な意味変更で、legacy client は commit 前の selecting フェーズから mirror を送りえたが、open 前の mirror は受信側にとって適用先のない noise であり段階的移行の回帰として受容する。1s レート窓。payload は additive に `browseGeneration`（送信者が観測した generation、member-drive のみ）を載せうる — server は現行 generation と不一致なら relay せず drop、受信側も不一致なら drop する。close→reopen の境界を跨いだ in-flight frame が新 generation を汚染するのを防ぐ。タグなし frame（legacy/mixed peer）は検証不能のため従来通り relay される |
+| UI_SYNC | browse 画面ミラー (scroll progress 等) | ephemeral。reader state 混入禁止。初回 commit 前（manifest なし）は picking mirror として双方向に relay する — picking 過程そのものの共有はプロダクト要件であり、受信側は最初の frame で sidebar を開く。commit 後は shared browse open 中のみ relay — member の SET_ACTIVITY selecting による明示的 open（作品変更フロー）だけが mirror を許可し、位相が selecting でも open でなければ forbidden。1s レート窓。payload は additive に `browseGeneration`（送信者が観測した generation、member-drive のみ）を載せうる — server は現行 generation と不一致なら relay せず drop、受信側も不一致なら drop する。close→reopen の境界を跨いだ in-flight frame が新 generation を汚染するのを防ぐ。タグなし frame（legacy/mixed peer）は検証不能のため従来通り relay される |
 | PING/PONG | keepalive | シーケンスしない |
 | TRANSPORT_STATE | dc up/down 報告 | メンバー dc_state の更新 |
 
