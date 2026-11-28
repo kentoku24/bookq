@@ -11,14 +11,19 @@ describe('pairController member-drive composition gate', () => {
     globalThis.PairClient.createClient = originalCreateClient;
     delete window.PairController;
     delete window.BOOKQ_BROWSE_SYNC_API;
+    delete window.BOOKQ_SIDEBAR_CLOSE_API;
     window.sessionStorage.removeItem('bookq.readerSync.v1');
   });
 
-  async function advertisedFeatures(marker) {
+  async function advertisedFeatures(marker, opts) {
     vi.resetModules();
     delete window.PairController;
     if (marker === undefined) delete window.BOOKQ_BROWSE_SYNC_API;
     else window.BOOKQ_BROWSE_SYNC_API = marker;
+    // The close-intent API ships with app.js in production; tests opt out
+    // explicitly to pin the composition failing closed without it.
+    if (!(opts && opts.closeApi === false)) window.BOOKQ_SIDEBAR_CLOSE_API = 1;
+    else delete window.BOOKQ_SIDEBAR_CLOSE_API;
     const client = {
       create: vi.fn(() => Promise.resolve({})),
       resume: vi.fn(() => Promise.resolve({})),
@@ -41,6 +46,13 @@ describe('pairController member-drive composition gate', () => {
     expect(await advertisedFeatures(2)).toEqual(['member-drive-v1']);
   });
 
+  it('does not advertise member-drive when the close-intent API is absent', async () => {
+    // Partial-SWR hazard: legacy app.js has no close-intent marker, so an
+    // explicit user close could never emit endBrowse — advertising
+    // member-drive would wedge shared browse open server-side.
+    expect(await advertisedFeatures(2, {closeApi: false})).toEqual([]);
+  });
+
   it('boot credential resume evaluates the composition after later defer scripts', async () => {
     window.sessionStorage.setItem('bookq.readerSync.v1', JSON.stringify({
       sessionId: 's-boot', memberId: 'm-boot', role: 'leader',
@@ -49,6 +61,7 @@ describe('pairController member-drive composition gate', () => {
     vi.resetModules();
     delete window.PairController;
     delete window.BOOKQ_BROWSE_SYNC_API;
+    delete window.BOOKQ_SIDEBAR_CLOSE_API;
     const client = {
       resume: vi.fn(() => Promise.resolve({})),
       subscribe() { return function () {}; },
@@ -60,6 +73,7 @@ describe('pairController member-drive composition gate', () => {
     // pairSync.js is a later defer sibling in index.html. Its marker must be
     // visible before the controller's boot timer constructs the client.
     window.BOOKQ_BROWSE_SYNC_API = 2;
+    window.BOOKQ_SIDEBAR_CLOSE_API = 1;
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     expect(createClient).toHaveBeenCalledTimes(1);

@@ -203,8 +203,11 @@ capability intersection 成立時:
   `paused` は `selecting` を mask するため、client の close/reconcile は派生 phase ではなくこの直交状態を使う
 - open STATE では `browse:true` と同じ frame に限り、additive metadata として
   `browseOpener`（member id）と `browseOpenerRole` を送る。`browseGeneration` は open
-  frame にも入る session-scoped な値で、初期値は 0、closed→open transition だけが
-  increment する。close・work commit・capability downgrade では reset されず、
+  frame にも入る session-scoped な値で、初期値は 0、**真の遷移（closed→open と
+  open→closed の双方）ごとに increment する** — close も因果 epoch 境界であり、
+  explicit endBrowse・work commit・capability downgrade・legacy leader close の
+  全てで進む。これにより commit 前の因果知識で生成された frame と commit を
+  観測した後の frame を区別できる。冪等 close（既に closed）では進まず、
   RESUME/reconnect を跨いでも session 終了まで reset しない。
   duplicate open でも増えない。client mirror seed は自分の DOM 状態ではなく
   opener member id で決める。opener だけが初期 seed を送り、非 opener は最初の remote frame を
@@ -385,7 +388,7 @@ REJECT フレームの `reason` は以下の enum。実装間で文字列一致�
 | type | 用途 | 規則 |
 |---|---|---|
 | SIGNAL | WebRTC offer/answer/ice 中継 | シーケンスしない。dc ネゴシエーション専用 |
-| UI_SYNC | browse 画面ミラー (scroll progress 等) | ephemeral。reader state 混入禁止。初回 commit 前（manifest なし）は picking mirror として双方向に relay する — picking 過程そのものの共有はプロダクト要件であり、受信側は最初の frame で sidebar を開く。commit 後は shared browse open 中のみ relay — member の SET_ACTIVITY selecting による明示的 open（作品変更フロー）だけが mirror を許可し、位相が selecting でも open でなければ forbidden。1s レート窓。payload は additive に `browseGeneration`（送信者が観測した generation、member-drive のみ）を載せうる — server は現行 generation と不一致なら relay せず drop、受信側も不一致なら drop する。close→reopen の境界を跨いだ in-flight frame が新 generation を汚染するのを防ぐ。タグなし frame（legacy/mixed peer）は検証不能のため従来通り relay される |
+| UI_SYNC | browse 画面ミラー (scroll progress 等) | ephemeral。reader state 混入禁止。**tile browsing は常に共有される**（プロダクト判断 — 初回 picking も作品を閉じた後の物色も同じ行為）: member の frame は pair 成立中は browse open・commit 状態に関わらず常に relay され、受信側は最初の frame で sidebar を開く。guest の frame は shared browse が明示的に開いている間のみ relay され、それ以外は forbidden（guest は受信のみ）。1s レート窓。payload は additive に `browseGeneration`（送信者が観測した generation、member-drive のみ）を載せうる — server は現行 generation と不一致なら relay せず drop、受信側も不一致なら drop する。open/close の境界を跨いだ in-flight frame が新 generation を汚染するのを防ぐ。タグなし frame は、member-drive intersection が成立し generation > 0 の間は pre-upgrade の straggler として drop され、それ以外（legacy/mixed pair、generation 0 の casual picking）では relay される |
 | PING/PONG | keepalive | シーケンスしない |
 | TRANSPORT_STATE | dc up/down 報告 | メンバー dc_state の更新 |
 

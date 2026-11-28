@@ -636,10 +636,10 @@ def test_user_closed_sidebar_stays_closed_until_next_arm(browser, server):
         pg.wait_for_function(
             "() => document.getElementById('sidebar')"
             ".classList.contains('open')", timeout=5000)
-        # user closes it (Esc / menu) — the class observer marks the arm
-        pg.evaluate(
-            "() => document.getElementById('sidebar')"
-            ".classList.remove('open')")
+        # user closes it (Esc / menu) — those gestures call
+        # closeSidebar({explicit:true}), and the intent marker is what
+        # distinguishes a user close from the many programmatic ones.
+        pg.evaluate("() => window.closeSidebar({explicit: true})")
         pg.wait_for_function(
             "() => window.__pairBrowseSync.userClosed === true",
             timeout=5000)
@@ -657,6 +657,38 @@ def test_user_closed_sidebar_stays_closed_until_next_arm(browser, server):
         pg.evaluate(
             """() => window.__pairBrowseSync.applyRemote(
                  {view: 'browse', path: null, top: 20, viewH: 500})""")
+        pg.wait_for_function(
+            "() => document.getElementById('sidebar')"
+            ".classList.contains('open')", timeout=5000)
+    finally:
+        ctx.close()
+
+
+def test_programmatic_close_does_not_suppress_auto_open(browser, server):
+    """A programmatic close (work commit, wire browse close, reader restore)
+    is not a user choice: the next mirror frame must auto-open again."""
+    ctx, pg = _dev_page(browser, server,
+                        viewport={"width": 390, "height": 460})
+    try:
+        pg.wait_for_selector(".tile")
+        assert _solo_armed(pg, "follower") is True
+        pg.evaluate(
+            """() => window.__pairBrowseSync.applyRemote(
+                 {view: 'browse', path: null, top: 0, viewH: 500})""")
+        pg.wait_for_function(
+            "() => document.getElementById('sidebar')"
+            ".classList.contains('open')", timeout=5000)
+        # programmatic close — no explicit intent, as a commit/wire close does
+        pg.evaluate("() => window.closeSidebar()")
+        pg.wait_for_function(
+            "() => document.getElementById('sidebar')"
+            ".classList.contains('open') === false", timeout=5000)
+        time.sleep(0.2)
+        assert pg.evaluate(
+            "() => window.__pairBrowseSync.userClosed") is False
+        pg.evaluate(
+            """() => window.__pairBrowseSync.applyRemote(
+                 {view: 'browse', path: null, top: 40, viewH: 500})""")
         pg.wait_for_function(
             "() => document.getElementById('sidebar')"
             ".classList.contains('open')", timeout=5000)

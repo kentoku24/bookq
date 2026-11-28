@@ -299,7 +299,7 @@ describe('pairSync browse generations', () => {
     // (spreadId set) with no open browse is the same human activity as the
     // initial picking — the casual mirror arms and the leader seeds by role.
     drive(state({
-      role: 'leader', memberId: 'm-leader',
+      role: 'leader', memberId: 'm-leader', phase: 'reading',
       browse: false, browseGeneration: 0,
       browseOpener: null, browseOpenerRole: null,
     }));
@@ -308,6 +308,23 @@ describe('pairSync browse generations', () => {
     localScroll(30);
     hook.flush();
     expect(sendUiSync).toHaveBeenCalled();
+  });
+
+  it('arms for the whole paired lifetime — reading phase, browse closed', () => {
+    // Mutation killer: reverting the arm to phase-gating must fail here,
+    // because no other test drives a non-selecting phase.
+    drive(state({
+      role: 'leader', memberId: 'm-leader', phase: 'reading',
+      browse: false, browseGeneration: 0,
+      browseOpener: null, browseOpenerRole: null,
+    }));
+    expect(hook.armed).toBe(true);
+    // follower side: a casual untagged frame applies and unlocks even in
+    // reading phase — the mirror does not wait for selecting.
+    hook.ctlEvent({type: 'ui-sync', payload: {
+      view: 'browse', path: null, top: 5, viewH: 100, mode: 'tile'}});
+    hook.flush();
+    expect(hook.unlocked).toBe(true);
   });
 
   it('treats generation emergence while continuously armed as a boundary', () => {

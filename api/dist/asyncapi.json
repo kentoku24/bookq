@@ -1056,7 +1056,7 @@
       "UiSyncPayload": {
         "properties": {
           "browseGeneration": {
-            "description": "送信者が観測した browse generation（member-drive のみ・additive）。 close→reopen で server 側 generation が進んだ後に到着した旧 generation の frame は server が relay せず drop し、relay を抜けたものも受信側が 現行 generation と不一致なら drop する — 世代境界を跨いだ in-flight frame が新 generation の初期状態（opener の first seed / unlock 判定） を汚染するのを防ぐ。タグなし（legacy/mixed peer）の frame は検証不能な ため従来通り relay される。\n",
+            "description": "送信者が観測した browse generation（member-drive のみ・additive）。 generation は真の遷移（closed→open と open→closed の双方）で進む session-scoped epoch — close も因果境界。server 側 generation が 進んだ後に到着した旧 generation の frame は server が relay せず drop し、relay を抜けたものも受信側が 現行 generation と不一致なら drop する — 世代境界を跨いだ in-flight frame が新 generation の初期状態（opener の first seed / unlock 判定） を汚染するのを防ぐ。タグなし frame は member-drive intersection 成立 かつ browse open 中は pre-upgrade straggler として drop され、それ以外 （legacy/mixed pair・browse 閉鎖中）では relay される。member の UI_SYNC は pair 成立中は browse open・commit 状態に関わらず常に relay される（tile browsing は常に共有）— generation 検査は relay 許可ではなく因果保護のみ。\n",
             "minimum": 1,
             "type": "integer"
           },
