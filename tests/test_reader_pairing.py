@@ -254,8 +254,11 @@ def test_ui_sync_relayed_between_paired_members(server):
     with _ws(server) as ws_a, _ws(server) as ws_b:
         _recv(ws_a); _recv(ws_b)
         sid, _, _ = _pair(ws_a, ws_b)
+        # Pre-commit picking mirror: member frames relay even before any
+        # shared browse is opened (the picking process itself is shared).
         ws_a.send(_req("UI_SYNC", _ui_payload(), sid=sid, rid="u0"))
-        assert _expect(ws_a, "REJECT")["reason"] == "forbidden"
+        ui0 = _expect(ws_b, "UI_SYNC")
+        assert ui0["payload"] == _ui_payload()
         ws_a.send(_req("SET_ACTIVITY", {"state": "selecting"},
                        sid=sid, rid="bo"))
         assert _expect(ws_a, "ACK")["request"] == "SET_ACTIVITY"
