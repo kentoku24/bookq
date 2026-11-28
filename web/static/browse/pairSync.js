@@ -319,11 +319,24 @@
     // a frame relayed just before the boundary can still arrive after the
     // new-generation STATE; only this receiver-side check closes that race.
     // Untagged frames (legacy/mixed peers) cannot be verified and pass.
-    var gen = (msg && typeof msg.browseGeneration === 'number' &&
-               isFinite(msg.browseGeneration) && msg.browseGeneration > 0)
-      ? msg.browseGeneration : null;
-    if (gen !== null && gen !== _browseGeneration) return;
+    if (_foreignGeneration(msg)) return;
     _applyRemote(msg);
+  }
+
+  /* Tagged generation of an inbound mirror frame, or null when the frame is
+   * untagged (legacy/mixed peer) or the tag is malformed. */
+  function _msgGeneration(msg) {
+    return (msg && typeof msg.browseGeneration === 'number' &&
+            isFinite(msg.browseGeneration) && msg.browseGeneration > 0)
+      ? msg.browseGeneration : null;
+  }
+
+  /* A verifiably-tagged frame whose generation is not the one this client
+   * currently observes belongs to a dead generation: it must neither apply
+   * nor unlock. Untagged frames cannot be verified and pass. */
+  function _foreignGeneration(msg) {
+    var gen = _msgGeneration(msg);
+    return gen !== null && gen !== _browseGeneration;
   }
 
   /* ── 送信 ── */
@@ -776,6 +789,11 @@
 
   function _applyRemote(msg, at) {
     if (!msg || msg.view !== 'browse') return;
+    // Revalidate at the point of effect: deferred consumption (stash retry,
+    // grid mutation, arm-edge) bypasses the receipt-time check, and a frame
+    // honestly tagged for generation N must not apply after the boundary to
+    // N+1 — regardless of which paths do or do not clear the stash.
+    if (_foreignGeneration(msg)) return;
     // 通常モードで非表示 root 配下への remote path は拒否 — pending に
     // stash しない（禁止対象を再適用可能にしない）し currentBrowsePath にも
     // 代入しない。同期を解除してトップへ戻す。表示設定やモードは

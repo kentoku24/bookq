@@ -185,6 +185,42 @@ describe('pairSync browse generations', () => {
     expect(hook.unlocked).toBe(true);
   });
 
+  it('treats generation emergence while continuously armed as a boundary', () => {
+    // Legacy/mixed open: no generation metadata anywhere. The legacy leader
+    // unlocks by role and seeds freely.
+    drive(state({
+      role: 'leader', memberId: 'm-leader',
+      memberDrive: false,
+      browse: undefined, browseGeneration: undefined,
+      browseOpener: undefined, browseOpenerRole: undefined,
+    }));
+    expect(sendUiSync).toHaveBeenCalledTimes(1);   // legacy opener seed
+    sendUiSync.mockClear();
+
+    // The pair upgrades in place (both members re-advertise) — generation
+    // metadata appears without any close/open edge, and the serialized
+    // opener of the member-drive generation is the FOLLOWER. The leader's
+    // legacy unlock must not survive into the new generation.
+    drive(state({
+      role: 'leader', memberId: 'm-leader',
+      browseGeneration: 1,
+      browseOpener: 'm-follower', browseOpenerRole: 'follower',
+    }));
+    localScroll(30);
+    hook.flush();
+    expect(sendUiSync).not.toHaveBeenCalled();
+
+    // The follower's opener frame unlocks the leader into the new generation.
+    hook.ctlEvent({type: 'ui-sync', payload: {
+      view: 'browse', path: null, top: 5, viewH: 100, mode: 'tile',
+      browseGeneration: 1,
+    }});
+    localScroll(42);
+    hook.flush();
+    expect(sendUiSync).toHaveBeenCalledTimes(1);
+    expect(sentPayloads()[0].browseGeneration).toBe(1);
+  });
+
   it('explicit closed browse metadata disarms sending across memberDrive loss', () => {
     drive(state());
     sendUiSync.mockClear();
