@@ -6,6 +6,11 @@ use serde_json::{Map, Value};
 pub const PROTOCOL_VERSION: i64 = 1;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_MANIFEST_BYTES: usize = 32 * 1024 * 1024;
+/// requestId is the dedup/tombstone key — an attacker-controlled unbounded
+/// string would let a flood pin arbitrary memory in retention sets, so the
+/// wire caps it. Real clients use short random ids (single digits of
+/// base36), so 128 is far beyond legitimate use.
+pub const REQUEST_ID_MAX_LEN: usize = 128;
 
 pub const ERR_VERSION: &str = "ERR_VERSION";
 pub const ERR_MALFORMED: &str = "ERR_MALFORMED";
@@ -153,8 +158,14 @@ pub fn parse_request(raw: &Map<String, Value>) -> Result<(), ProtocolError> {
             return fail(ERR_MALFORMED, format!("request missing key: {k}"));
         }
     }
-    if !raw["requestId"].as_str().is_some_and(|s| !s.is_empty()) {
-        return fail(ERR_MALFORMED, "requestId must be non-empty str");
+    if !raw["requestId"]
+        .as_str()
+        .is_some_and(|s| !s.is_empty() && s.len() <= REQUEST_ID_MAX_LEN)
+    {
+        return fail(
+            ERR_MALFORMED,
+            "requestId must be non-empty str within length cap",
+        );
     }
     if !(raw["sessionId"].is_null() || raw["sessionId"].is_string()) {
         return fail(ERR_MALFORMED, "sessionId must be str|null");
@@ -440,6 +451,26 @@ mod tests {
             ("baseRevision", Value::from(0)),
             ("payload", payload),
         ])
+    }
+
+    #[test]
+    fn request_id_length_cap() {
+        // The dedup/tombstone key derives from requestId — an unbounded
+        // attacker-controlled string would pin arbitrary memory in the
+        // retention sets, so the wire itself caps it.
+        let at_cap = "x".repeat(REQUEST_ID_MAX_LEN);
+        let mut r = req(
+            "TURN",
+            frame(&[("delta", Value::from(1)), ("crossChapter", Value::Bool(false))]),
+        );
+        r.as_object_mut().unwrap()["requestId"] = Value::String(at_cap);
+        parse_request(r.as_object().unwrap()).unwrap();
+        let over = "x".repeat(REQUEST_ID_MAX_LEN + 1);
+        r.as_object_mut().unwrap()["requestId"] = Value::String(over);
+        assert_eq!(
+            parse_request(r.as_object().unwrap()).unwrap_err().code,
+            ERR_MALFORMED
+        );
     }
 
     #[test]

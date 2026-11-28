@@ -101,13 +101,22 @@ pub const END_SHUTDOWN: &str = "shutdown";
 /// The session's leader was disabled/removed — their guest grants and the
 /// pair session itself die together.
 pub const END_OWNER_DISABLED: &str = "owner_disabled";
+/// The load-op tombstone budget ran out — almost always a flood or a
+/// client stuck in a retry loop. The session dies rather than choosing
+/// between unbounded memory and silently forgetting replay protection.
+pub const END_DEDUP_EXHAUSTED: &str = "dedup_exhausted";
 
 // dedup retention: full outcomes for the last DEDUP_WINDOW keys, evicted
 // keys remembered as tombstones. Ordinary tombstones are FIFO-capped;
-// load-op tombstones are not — OPEN_WORK/SET_OFFSET skip the epoch gate,
-// so losing one would make a replay executable again.
+// load-op tombstones are budgeted separately — OPEN_WORK is the one op
+// that skips the epoch gate, so losing one would make a replay executable
+// again. The load budget is a hard cap, not a FIFO: hitting it condemns
+// the session (see dedup_tombstone), because silently aging entries out
+// would trade correctness for memory and honest sessions never come
+// close — a work pick is a human-scale action.
 pub const DEDUP_WINDOW: usize = 256;
 pub const DEDUP_TOMBSTONE_MAX: usize = 8192;
+pub const DEDUP_LOAD_TOMBSTONE_MAX: usize = 1024;
 
 /// Failed-JOIN throttle per link: past `JOIN_FAIL_MAX` rejects inside the
 /// window the transport is closed (6-digit codes are brute-forceable —
@@ -540,10 +549,17 @@ pub struct PairSession {
     dedup_order: VecDeque<String>,
     pub dedup_seen: HashSet<String>,
     dedup_seen_order: VecDeque<String>,
-    /// Tombstones for OPEN_WORK/SET_OFFSET outcomes. These are deliberately
-    /// outside dedup_seen's FIFO cap: load ops skip the epoch gate, so a
-    /// forgotten load tombstone turns a replay into executable state again.
+    /// Tombstones for OPEN_WORK outcomes, hard-capped at
+    /// DEDUP_LOAD_TOMBSTONE_MAX. OPEN_WORK is the one op that skips the
+    /// epoch gate, so a forgotten load tombstone turns a replay into
+    /// executable state again — entries never age out while the session
+    /// lives. Overflow condemns the session instead.
     pub dedup_load_seen: HashSet<String>,
+    /// Set when the load-op tombstone budget is exceeded. The session is
+    /// torn down after the current dispatch/completion unwinds — never
+    /// mid-mutation — so replay protection is never silently dropped and
+    /// memory stays bounded.
+    pub condemned: bool,
     pub load_seq: i64,
     pub pending_load: Option<LoadJob>,
     /// Whether the currently committed work load came from bootstrap. Once a
@@ -591,6 +607,7 @@ impl PairSession {
             dedup_seen: HashSet::new(),
             dedup_seen_order: VecDeque::new(),
             dedup_load_seen: HashSet::new(),
+            condemned: false,
             load_seq: 0,
             pending_load: None,
             committed_load_auto: None,
@@ -1307,6 +1324,13 @@ impl Inner {
                 }
             }
             _ => self.reject(link_id, req_id(req), Some(&t), REASON_MALFORMED, None),
+        }
+        // A condemned session is torn down only after the dispatch unwinds —
+        // killing it mid-mutation would strand half-applied state. Whatever
+        // this frame validly produced (ACK/REJECT) has already gone out;
+        // the END frame is the final word.
+        if self.session(&sid).is_some_and(|s| s.condemned) {
+            self.end_session(&sid, END_DEDUP_EXHAUSTED);
         }
     }
 
@@ -2852,6 +2876,12 @@ impl Inner {
             frame["revision"]
         );
         self.broadcast(sid, &frame);
+        // The epoch rollover above can push surviving window entries into
+        // the load tombstone set; if that crossed the budget the session is
+        // already fully committed, so teardown here loses nothing.
+        if self.session(sid).is_some_and(|s| s.condemned) {
+            self.end_session(sid, END_DEDUP_EXHAUSTED);
+        }
     }
 
     /// Work-load failure: typed ERROR frame + current STATE.
@@ -3216,20 +3246,29 @@ impl Inner {
 }
 
 fn dedup_frame_is_load(frame: &Value) -> bool {
+    // OPEN_WORK is the one op that skips the epoch/manifestVersion/base
+    // gates (see sequenced_op), so it is the only op whose replay needs
+    // tombstone protection past an epoch rollover. SET_OFFSET replays are
+    // already stopped by those gates and stay in the ordinary FIFO set.
     matches!(
         frame.get("request").and_then(|v| v.as_str()),
-        Some("OPEN_WORK" | "SET_OFFSET")
+        Some("OPEN_WORK")
     )
 }
 
 /// Remember an evicted dedup key without storing its outcome. Ordinary
-/// tombstones are FIFO-capped; load-op tombstones are kept in a separate
-/// session-lifetime set because OPEN_WORK/SET_OFFSET skip the epoch gate.
-/// Letting one silently age out would turn a replay back into executable
-/// state, so fail-closed retention wins over the ordinary memory bound here.
+/// tombstones are FIFO-capped; OPEN_WORK tombstones are budgeted in a
+/// separate set because a forgotten one turns a replay into executable
+/// state again. The budget is a hard cap: once it is exceeded the session
+/// is condemned and torn down after the current dispatch, rather than
+/// silently aging entries out (correctness loss) or growing memory
+/// without bound (availability loss).
 fn dedup_tombstone(s: &mut PairSession, key: String, load_op: bool) {
     if load_op {
         s.dedup_load_seen.insert(key);
+        if s.dedup_load_seen.len() > DEDUP_LOAD_TOMBSTONE_MAX {
+            s.condemned = true;
+        }
         return;
     }
     if s.dedup_seen.insert(key.clone()) {
@@ -4360,6 +4399,64 @@ mod tests {
         assert_eq!(frames[0]["type"], "REJECT");
         assert_eq!(frames[0]["reason"], state::REASON_STALE_REQUEST);
         assert!(inner.session(&sid).unwrap().pending_load.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_tombstone_overflow_condemns_and_ends_session() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner,
+            &reg,
+            &l1,
+            &mut r1,
+            &l2,
+            &mut r2,
+            &[CAP_MEMBER_DRIVE],
+            &[CAP_MEMBER_DRIVE],
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+
+        // Exceed the dedicated budget through the tombstone primitive itself.
+        // Honest sessions never come close — a work pick is human-scale — so
+        // crossing it means a flood, and the session must die rather than
+        // choose between unbounded memory and dropped replay protection.
+        {
+            let s = inner.session_mut(&sid).unwrap();
+            for i in 0..=DEDUP_LOAD_TOMBSTONE_MAX {
+                dedup_tombstone(s, format!("leader:flood-{i}"), true);
+            }
+            assert!(s.condemned);
+        }
+        // The teardown fires only after the next dispatch unwinds.
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "active".into())]),
+                "post-flood-ping",
+            ),
+        );
+        let frames1 = drain_texts(&mut r1);
+        let frames2 = drain_texts(&mut r2);
+        let end1 = frames1.iter().find(|f| f["type"] == "END");
+        let end2 = frames2.iter().find(|f| f["type"] == "END");
+        assert!(
+            end1.is_some_and(|f| f["reason"] == END_DEDUP_EXHAUSTED),
+            "leader must see the exhausted END: {frames1:?}"
+        );
+        assert!(
+            end2.is_some_and(|f| f["reason"] == END_DEDUP_EXHAUSTED),
+            "follower must see the exhausted END: {frames2:?}"
+        );
+        assert!(inner.session(&sid).is_none());
     }
 
     #[tokio::test]

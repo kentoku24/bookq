@@ -267,10 +267,14 @@ TURN/GOTO は `reading` でのみ受理:
   work manifest commit で epoch が進む時、epoch-changing load を起こした request 本人の ACK は新しい
   dedup window へ carry forward され、post-commit resend は再実行ではなく同一 ACK replay になる。
   trigger ACK は pending load と共に保持され、dedup window eviction のタイミングに依存しない。
-  この epoch rollover で tombstone 化する対象は、trigger ではない load op（`OPEN_WORK`/`SET_OFFSET`）
-  outcome のみである。非 load op は新しい epoch の gate で止まるため rollover 専用 tombstone を必要としない。
-  load op tombstone は通常 tombstone の FIFO cap で黙って evict せず session 終了まで保持する。
-  load op は epoch gate を skip する仕様と組み合わさっても、古い再送が最新 pick として再実行されないようにする
+  この epoch rollover で tombstone 化する対象は、trigger ではない `OPEN_WORK` outcome のみである。
+  `OPEN_WORK` は唯一 epoch/manifestVersion/baseRevision の各 gate を skip する op であり、再送が
+  古い pick として再実行されないよう rollover を跨いだ保護が必要になる。`SET_OFFSET` を含む他 op は
+  新しい epoch の gate で止まるため rollover 専用 tombstone を必要としない。
+  load tombstone は専用 budget（`DEDUP_LOAD_TOMBSTONE_MAX`）で管理し、FIFO cap で黙って evict しない。
+  budget を超えた場合は session を `dedup_exhausted` で fail-closed 終了する — tombstone を黙って
+  捨てると再送が実行可能状態に戻るため、境界を保てない session を生かし続けるより終了を選ぶ。
+  requestId には長さ上限（128 chars）があり、tombstone のメモリは session あたり hard bound される。
 
 ### REJECT snapshot
 
