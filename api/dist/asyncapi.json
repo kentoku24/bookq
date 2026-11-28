@@ -891,6 +891,7 @@
             "type": "object"
           },
           "requestId": {
+            "maxLength": 128,
             "minLength": 1,
             "type": "string"
           },

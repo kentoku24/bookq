@@ -264,7 +264,7 @@ components:
       required: [v, requestId, sessionId, workEpoch, baseRevision, type, payload]
       properties:
         v: {type: integer, const: 1}
-        requestId: {type: string, minLength: 1}
+        requestId: {type: string, minLength: 1, maxLength: 128}
         sessionId: {type: [string, "null"]}
         workEpoch: {type: integer, minimum: 0}
         baseRevision: {type: integer, minimum: 0}
