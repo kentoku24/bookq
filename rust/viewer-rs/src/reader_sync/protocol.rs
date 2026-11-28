@@ -400,6 +400,18 @@ fn validate_ui_sync(p: &Map<String, Value>) -> Result<(), ProtocolError> {
             return fail(ERR_RANGE, "UI_SYNC.mode must be tile|list|card");
         }
     }
+    // browseGeneration is additive/optional, but when present it must be a
+    // positive integer — a malformed tag must not silently degrade to
+    // untagged (which bypasses both generation drop checks as if the peer
+    // were legacy).
+    if let Some(bg) = p.get("browseGeneration") {
+        if !bg.is_null() && !bg.as_i64().is_some_and(|v| v >= 1) {
+            return fail(
+                ERR_RANGE,
+                "UI_SYNC.browseGeneration must be int >= 1 when present",
+            );
+        }
+    }
     if let Some(pr) = p.get("pred") {
         if !pr.is_null() {
             let ok = pr
