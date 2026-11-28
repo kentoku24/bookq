@@ -1362,10 +1362,13 @@ async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Respo
             let st2 = st.clone();
             // The protocol cap (64 KiB) is enforced in parse_frame only after
             // axum has buffered the whole message — with default limits that
-            // means up to 64 MiB per message. Cap the transport at the same
-            // boundary so oversize input is rejected while buffering instead.
-            wsu.max_message_size(64 * 1024)
-                .max_frame_size(64 * 1024)
+            // means up to 64 MiB per message. Bound the transport well below
+            // that, but with slack above the protocol cap: marginally oversize
+            // input must still buffer completely so the protocol layer can
+            // reject it with the contractual 1009 close instead of the
+            // transport dying mid-stream without a close frame.
+            wsu.max_message_size(256 * 1024)
+                .max_frame_size(256 * 1024)
                 .on_upgrade(move |socket| {
                     reader_sync_conn(socket, st2, user, guest_token)
                 })
